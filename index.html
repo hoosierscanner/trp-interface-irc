@@ -3,11 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<script src="auth.js?v=1"></script>
-<title>tr-engine IRC</title>
-<meta name="card-title" content="IRC Radio">
-<meta name="card-description" content="IRC-style live radio monitor with channels, nicks, and audio playback">
-<meta name="card-order" content="0">
+<title>Radio IRC</title>
+<script>
+  window.THEME_ENGINE_OPTIONS = {
+    pageTitle: 'Radio IRC',
+    pageSubtitle: 'Talkgroups as channels, calls as messages',
+    homeHref: './',
+  };
+</script>
 <script src="theme-config.js"></script>
 <style>
 :root {
@@ -985,13 +988,17 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 @media (max-width: 768px) {
   .panel-resizer { display: none; }
 }
+
+/* A call not transcribed (skipped, failed): its reason, muted. A call waiting for its recording. */
+.msg .voice-text.muted { color: var(--text-muted); font-style: italic; }
+.msg .voice-pending { color: var(--text-muted); }
 </style>
 </head>
 <body>
 
 <div class="titlebar">
   <button class="mobile-hamburger" id="mobile-hamburger" aria-label="Open channels">☰</button>
-  <span class="server">tr-engine</span>
+  <span class="server">trunk-pro</span>
   <span>—</span>
   <span id="titlebar-chan">*status</span>
   <button class="chan-edit-btn" id="titlebar-edit-btn" title="Edit channel name">&#9998;</button>
@@ -1004,7 +1011,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   <div class="drawer-backdrop" id="drawer-backdrop"></div>
   <div class="channel-tree" id="channel-tree">
     <div class="tree-header-row">
-      <span class="tree-header-text">tr-engine</span>
+      <span class="tree-header-text">trunk-pro</span>
       <button class="read-all-btn" id="read-all-btn">Read All</button>
     </div>
     <div class="tree-search">
@@ -1024,7 +1031,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
       <span class="chan-name" id="chan-name">*status</span>
       <button class="chan-edit-btn" id="chan-edit-btn" title="Edit channel name">&#9998;</button>
       <span class="chan-mode" id="chan-mode"></span>
-      <span class="chan-topic" id="chan-topic">Connecting to tr-engine...</span>
+      <span class="chan-topic" id="chan-topic">Connecting to the recorder...</span>
       <span class="chan-count" id="chan-count"></span>
     </div>
     <div class="messages" id="messages"></div>
@@ -1059,7 +1066,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 
 <div class="statusbar">
   <span class="status-ok" id="status-dot">●</span>
-  <span id="status-server">tr-engine</span>
+  <span id="status-server">trunk-pro</span>
   <span class="sep">│</span>
   <span id="status-channels">0 channels</span>
   <span class="sep">│</span>
@@ -1083,7 +1090,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
       <span id="unit-modal-system" class="unit-modal-system"></span>
     </div>
     <div class="unit-modal-tag-row">
-      <input id="unit-modal-tag" class="unit-modal-tag-input" type="text" placeholder="No alpha tag">
+      <input id="unit-modal-tag" class="unit-modal-tag-input" type="text" placeholder="No name">
       <button id="unit-modal-save" class="unit-modal-save" disabled>Save</button>
       <span id="unit-modal-save-status" class="unit-modal-save-status"></span>
     </div>
@@ -1097,7 +1104,10 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   </div>
 </div>
 
-<script>
+<script type="module">
+// The recorder's own client library, served by the recorder on this port.
+import { TrunkClient, systemName } from "/api/client.js";
+
 // ══════════════════════════════════════════════════════════════
 // TODO — Enhancement ideas
 // ══════════════════════════════════════════════════════════════
@@ -1112,11 +1122,18 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 // ══════════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════════
-// CONFIG — set your tr-engine base URL
-// Override via query param: ?api=http://localhost:3000/api/v1
+// CONFIG — the transcribe plugin's HTTP API
+// Default http://127.0.0.1:8767; ?transcribe=http://host:port in the URL, or /api <url>,
+// sets it, and it is remembered (localStorage). The recorder is the page's own host.
 // ══════════════════════════════════════════════════════════════
 const params = new URLSearchParams(location.search);
-const API_BASE = (params.get('api') || '/api/v1').replace(/\/+$/, '');
+const TRANSCRIBE_DEFAULT = 'http://127.0.0.1:8767';
+function loadTranscribeBase() {
+  const fromUrl = params.get('transcribe');
+  if (fromUrl) localStorage.setItem('irc_transcribe', fromUrl);
+  return (fromUrl || localStorage.getItem('irc_transcribe') || TRANSCRIBE_DEFAULT).replace(/\/+$/, '');
+}
+let TRANSCRIBE_BASE = loadTranscribeBase();
 
 const MAX_MESSAGES = 500;        // per channel scrollback
 const NICK_WIDTH = 130;          // px
@@ -1149,6 +1166,7 @@ const channels = new Map();
 const channelUnread = new Map();
 
 // Reverse lookups
+// system_id is a system's short name (the recorder's), everywhere in the page.
 const tgidToChannel = new Map();   // `${system_id}:${tgid}` → chanName
 const unitNickCache = new Map();   // `${system_id}:${unit_id}` → { nick, source }
 const SOURCE_PRIORITY = { manual: 4, csv: 3, mqtt: 2, event: 1, fallback: 0 };
@@ -1164,7 +1182,27 @@ const STATUS_CHANNEL = '*status';
 // Starred meta-channel: aggregates all favorited talkgroup activity
 const STARRED_CHANNEL = '\u2605 Starred';
 
-// Connection state
+// The connection to the recorder serving this page (client.js reconnects by itself). The frequent
+// monitorEvent kinds (affiliations among them) come only to a connection that subscribes to the
+// topic `activity`; client.js sends it again after every reconnect.
+const rec = new TrunkClient();
+rec.subscribe(['activity']);
+let bootstrapped = false;
+
+// Renames of channels and nicks made here. Listen access can't change the recorder's talkgroup
+// file or unit names, so they are kept in this browser and applied on top of the recorder's names:
+// { tg: { "shortName:tgid": name }, unit: { "shortName:unit": name } }.
+const nameOverrides = (() => {
+  try {
+    const o = JSON.parse(localStorage.getItem('irc-names') || '{}');
+    return { tg: o.tg || {}, unit: o.unit || {} };
+  } catch { return { tg: {}, unit: {} }; }
+})();
+function saveNameOverrides() {
+  localStorage.setItem('irc-names', JSON.stringify(nameOverrides));
+}
+
+// Connection state (sseConnection: the transcribe plugin's event stream)
 let sseConnection = null;
 let connectionState = 'disconnected'; // connecting, connected, disconnected
 let reconnectTimer = null;
@@ -1174,11 +1212,8 @@ let eventRate = [];
 // Typing state: Map<chanName, { nick, timeout }>
 const typingState = new Map();
 
-// Active calls tracker: Map<call_id, { tgid, system_id, units, start }>
-const activeCalls = new Map();
-
-// Pending transcriptions: transcription SSE events that arrived before messages were rendered.
-// Map<call_id, { system_id, tgid, text, ... }> — applied when messages appear.
+// Pending transcriptions: transcripts that arrived before their call's messages were rendered.
+// Map<path, transcript> — applied when messages appear.
 const pendingTranscriptions = new Map();
 
 // Call src_list cache: Map<call_id, srcList[]> — for player segment display
@@ -1399,7 +1434,7 @@ function scannerPlayNext() {
   // Find the message element for this call in the active channel
   let msgEl = null;
   if (item.chanName === activeChannel) {
-    msgEl = messagesEl.querySelector(`[data-call-id="${item.callId}"]`);
+    msgEl = messagesEl.querySelector(`[data-call-id="${CSS.escape(String(item.callId))}"]`);
   }
 
   // Play the call audio
@@ -1654,19 +1689,19 @@ function openUnitModal(user) {
     if (e.key === 'Enter' && !saveBtn.disabled) saveBtn.click();
   };
 
-  const unitId = encodeURIComponent(user.systemId + ':' + user.unitId);
+  // The name shown: a rename made here, else the recorder's.
+  const recName = recUnitName(user.systemId, user.unitId);
+  const shownTag = nameOverrides.unit[unitKey(user.systemId, user.unitId)] || recName || '';
+  tagInput.value = shownTag;
+  tagInput._originalTag = shownTag;
+  tagInput.placeholder = recName || 'No name';
 
-  // Parallel fetch: unit detail + recent events
-  fetch(API_BASE + '/units/' + unitId)
-    .then(r => r.ok ? r.json() : null)
+  // The recorder's radio registry: the radio, its latest transmissions and affiliations
+  queryRadio({ what: 'unit', system: user.systemId, key: user.unitId })
     .then(data => {
       if (!data || currentModalUnit !== user) return;
-      if (data.system_name) sysEl.textContent = data.system_name;
-      if (data.alpha_tag) {
-        tagInput.value = data.alpha_tag;
-        tagInput._originalTag = data.alpha_tag;
-        saveBtn.disabled = true;
-      }
+      if (data.error) throw new Error(data.error);
+      const row = data.row;
       metaEl.textContent = '';
       const addMeta = (label, value) => {
         const l = document.createElement('span');
@@ -1678,20 +1713,25 @@ function openUnitModal(user) {
         metaEl.appendChild(l);
         metaEl.appendChild(v);
       };
-      addMeta('State', data.last_event_type || 'unknown');
-      if (data.last_event_tg_tag || data.last_event_tgid) {
-        addMeta('Last TG', (data.last_event_tg_tag || '') + (data.last_event_tgid ? ' (' + data.last_event_tgid + ')' : ''));
+      if (!row) {
+        addMeta('State', 'not heard');
+        setEventsLoading(eventsEl, 'No recent events');
+        return;
       }
-      addMeta('First seen', relativeTime(data.first_seen));
-      addMeta('Last seen', relativeTime(data.last_seen));
-    })
-    .catch(() => {});
+      addMeta('State', row.reg === false ? 'deregistered' : row.aff != null ? 'affiliated' : 'heard');
+      if (row.aff != null) {
+        addMeta('Affiliated', ((tgMeta(user.systemId, row.aff).alphaTag || '') + ' (' + row.aff + ')').trim());
+      }
+      addMeta('Transmissions', String(row.tx || 0));
+      addMeta('First seen', relativeTime(row.first * 1000));
+      addMeta('Last seen', relativeTime(row.last * 1000));
 
-  fetch(API_BASE + '/units/' + unitId + '/events?limit=30')
-    .then(r => r.ok ? r.json() : null)
-    .then(data => {
-      if (!data || currentModalUnit !== user) return;
-      const events = data.events || [];
+      // Its transmissions ("call") and affiliations ("join"), newest first
+      const events = [];
+      for (const r of data.recent || []) events.push({ event_type: 'call', time: r.t * 1000, tgid: r.tg, tg_alpha_tag: r.alphaTag });
+      for (const a of data.affiliations || []) events.push({ event_type: 'join', time: a.t * 1000, tgid: a.tg, tg_alpha_tag: a.alphaTag });
+      events.sort((a, b) => b.time - a.time);
+      events.length = Math.min(events.length, 30);
       eventsEl.textContent = '';
       if (events.length === 0) {
         setEventsLoading(eventsEl, 'No recent events');
@@ -1750,17 +1790,13 @@ function saveUnitTag(user, newTag) {
   saveStatus.className = 'unit-modal-save-status';
   saveStatus.style.color = '';
 
-  const unitId = encodeURIComponent(user.systemId + ':' + user.unitId);
-  fetch(API_BASE + '/units/' + unitId, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ alpha_tag: newTag, alpha_tag_source: 'manual' }),
-  })
-    .then(r => {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
+  // Kept in this browser (listen access can't change the recorder's unit names); empty: the recorder's name again.
+  const renameKey = unitKey(user.systemId, user.unitId);
+  if (newTag) nameOverrides.unit[renameKey] = newTag;
+  else delete nameOverrides.unit[renameKey];
+  Promise.resolve()
     .then(() => {
+      saveNameOverrides();
       tagInput._originalTag = newTag;
       saveBtn.disabled = true;
       saveStatus.textContent = '\u2713';
@@ -1941,7 +1977,9 @@ function ensureChannel(tg) {
   if (tgidToChannel.has(key)) return tgidToChannel.get(key);
 
   if (tg.system_name && !systemNames.has(tg.system_id)) systemNames.set(tg.system_id, tg.system_name);
-  const chanName = toChannelName(tg.alpha_tag || tg.tg_alpha_tag);
+  // A rename made here wins; a talkgroup not in the file is named by its number.
+  const label = nameOverrides.tg[key] || tg.alpha_tag || tg.tg_alpha_tag || String(tg.tgid);
+  const chanName = toChannelName(label);
 
   // Handle collisions — disambiguate both the existing and new channel
   let finalName = chanName;
@@ -1969,7 +2007,7 @@ function ensureChannel(tg) {
     channels.set(finalName, {
       tgid: tg.tgid,
       system_id: tg.system_id,
-      alpha_tag: tg.alpha_tag || tg.tg_alpha_tag || `TG ${tg.tgid}`,
+      alpha_tag: label,
       description: tg.description || tg.tg_description || '',
       tag: tg.tag || tg.tg_tag || '',
       group: tg.group || tg.tg_group || 'Ungrouped',
@@ -1991,6 +2029,10 @@ function resolveChannel(systemId, tgid) {
 
 function resolveNick(systemId, unitId, alphaTag, source) {
   const key = unitKey(systemId, unitId);
+  // A rename made here wins; with no name given, the recorder's (unit names, alias heard).
+  const renamed = nameOverrides.unit[key];
+  if (renamed) return toNick(renamed, unitId);
+  if (!alphaTag || !alphaTag.trim()) alphaTag = recUnitName(systemId, unitId);
   const incoming = (source && SOURCE_PRIORITY[source] !== undefined) ? source : 'event';
   if (alphaTag && alphaTag.trim()) {
     const nick = toNick(alphaTag, unitId);
@@ -2080,13 +2122,14 @@ function buildMsgEl(m) {
       const body = document.createElement('span');
       body.className = 'body';
 
+      const playable = m.path && !m.noAudio;
       if (m.text) {
         // Transcription text with compact audio controls
         const textSpan = document.createElement('span');
-        textSpan.className = 'voice-text';
+        textSpan.className = 'voice-text' + (m.textMuted ? ' muted' : '');
         textSpan.textContent = m.text;
         body.appendChild(textSpan);
-
+        if (playable) {
         const controls = document.createElement('span');
         controls.className = 'voice-controls';
         const play = document.createElement('span');
@@ -2094,7 +2137,7 @@ function buildMsgEl(m) {
         play.textContent = '▶';
         play.addEventListener('click', (e) => {
           e.preventDefault();
-          playCall(m.callId, m.nick, m.channel, div, m.pos, m.txDuration);
+          playCall(m.path, m.nick, m.channel, div, m.pos, m.txDuration);
         });
         controls.appendChild(play);
         const listen = document.createElement('a');
@@ -2103,10 +2146,17 @@ function buildMsgEl(m) {
         listen.href = '#';
         listen.addEventListener('click', (e) => {
           e.preventDefault();
-          playCall(m.callId, m.nick, m.channel, div, m.pos, m.txDuration);
+          playCall(m.path, m.nick, m.channel, div, m.pos, m.txDuration);
         });
         controls.appendChild(listen);
         body.appendChild(controls);
+        }
+      } else if (!playable) {
+        // A live call that has left the air: its recording (audio, transcript) is on its way
+        const pending = document.createElement('span');
+        pending.className = 'voice-pending';
+        pending.textContent = m.path ? (dur || 'no audio') : '\u2026';
+        body.appendChild(pending);
       } else {
         // No transcription yet — show play button only
         const play = document.createElement('span');
@@ -2114,7 +2164,7 @@ function buildMsgEl(m) {
         play.textContent = '▶';
         play.addEventListener('click', (e) => {
           e.preventDefault();
-          playCall(m.callId, m.nick, m.channel, div, m.pos, m.txDuration);
+          playCall(m.path, m.nick, m.channel, div, m.pos, m.txDuration);
         });
         body.appendChild(play);
 
@@ -2131,7 +2181,7 @@ function buildMsgEl(m) {
         listen.href = '#';
         listen.addEventListener('click', (e) => {
           e.preventDefault();
-          playCall(m.callId, m.nick, m.channel, div, m.pos, m.txDuration);
+          playCall(m.path, m.nick, m.channel, div, m.pos, m.txDuration);
         });
         body.appendChild(listen);
       }
@@ -2321,7 +2371,13 @@ function isChannelActive(ch) {
   return channelHasActivity.has(ch) || ch === activeChannel || (channelUnread.get(ch) || 0) > 0;
 }
 
+let treeFrame = 0;
 function renderTree() {
+  if (treeFrame) return;
+  treeFrame = requestAnimationFrame(() => { treeFrame = 0; renderTreeNow(); });
+}
+
+function renderTreeNow() {
   // Group channels by group field
   const groups = new Map();
   for (const [name, ch] of channels) {
@@ -2634,14 +2690,14 @@ function saveChannelTag(newTag) {
   const state = channels.get(activeChannel);
   if (!state || !state.tgid || !newTag) return;
 
-  const tgId = encodeURIComponent(state.system_id + ':' + state.tgid);
-  fetch(API_BASE + '/talkgroups/' + tgId, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ alpha_tag: newTag, alpha_tag_source: 'manual' }),
-  })
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+  // Kept in this browser (listen access can't change the recorder's talkgroup file);
+  // the recorder's own name again drops the rename.
+  const renameKey = tgKey(state.system_id, state.tgid);
+  if (newTag === (tgMeta(state.system_id, state.tgid).alphaTag || '')) delete nameOverrides.tg[renameKey];
+  else nameOverrides.tg[renameKey] = newTag;
+  Promise.resolve()
     .then(() => {
+      saveNameOverrides();
       const oldChanName = activeChannel;
       const key = tgKey(state.system_id, state.tgid);
 
@@ -2736,19 +2792,81 @@ function switchChannel(ch) {
   if (window.innerWidth <= 768) closeDrawers();
 }
 
-/** Convert API calls into message objects for a channel. Returns messages oldest-first. Deduplicates by call_id. */
+/** A recorded call (the recorder's CallEntry) → the call shape this page's renderers read
+ *  (tr-engine's call fields). `call_id` is the entry's path; times are Unix ms; each keyup in
+ *  `src_list` gets its place in the audio (`pos`) and its length (to the next keyup, or the end). */
+function entryToCall(entry) {
+  const r = entry.record || {};
+  const startMs = r.start_time_ms || (r.start_time || 0) * 1000;
+  const lenS = r.call_length_ms != null ? r.call_length_ms / 1000 : (r.call_length || 0);
+  const srcs = [...(r.srcList || [])].sort((a, b) => (a.pos || 0) - (b.pos || 0));
+  return {
+    call_id: entry.path,
+    path: entry.path,
+    // Its audio stays in the recordings folder (false: deleted once the plugins were done).
+    audio: entry.audio !== false,
+    system_id: r.short_name || '',
+    tgid: r.talkgroup,
+    tg_alpha_tag: r.talkgroup_tag || '',
+    tg_description: r.talkgroup_description || '',
+    tg_tag: r.talkgroup_group_tag || '',
+    tg_group: r.talkgroup_group || '',
+    start_time: startMs,
+    stop_time: r.stop_time_ms || (r.stop_time || 0) * 1000,
+    duration: lenS,
+    emergency: !!r.emergency,
+    // Encrypted and not decrypted: no voice to hear or transcribe.
+    encrypted: !!r.encrypted && !r.decrypted,
+    unit_ids: srcs.map(s => s.src),
+    src_list: srcs.map((s, i) => {
+      const pos = s.pos || 0;
+      const end = i + 1 < srcs.length ? (srcs[i + 1].pos || 0) : lenS;
+      return {
+        src: s.src, tag: s.tag || s.tag_ota || '', pos,
+        time: startMs + pos * 1000,
+        duration: Math.max(0, end - pos),
+        emergency: s.emergency,
+      };
+    }),
+  };
+}
+
+/** The fields every message of a call carries: its path (audio and transcript), its system, start and talkers. */
+function callFields(call, sid) {
+  return {
+    callId: call.call_id, path: call.path, noAudio: call.audio === false,
+    systemId: sid, callStart: call.start_time, talkers: call.unit_ids || [],
+  };
+}
+
+// Copies of one transmission saved from several sites share a transmission_id: transmission_id → the path shown.
+const transmissionPaths = new Map();
+/** Another site's copy of a call already shown (same transmission_id, another path). */
+function isDuplicateCopy(entry) {
+  const t = entry && entry.record && entry.record.transmission_id;
+  if (!t) return false;
+  const shown = transmissionPaths.get(t);
+  if (shown) return shown !== entry.path;
+  transmissionPaths.set(t, entry.path);
+  if (transmissionPaths.size > 20000) transmissionPaths.delete(transmissionPaths.keys().next().value);
+  return false;
+}
+
+/** Convert calls (entryToCall) into message objects for a channel. Returns messages oldest-first. Deduplicates by call_id. */
 function callsToMessages(calls, chanName, systemId) {
   const msgs = [];
   const ch = channels.get(chanName);
   if (!channelLoadedCallIds.has(chanName)) channelLoadedCallIds.set(chanName, new Set());
   const loadedIds = channelLoadedCallIds.get(chanName);
-  const sorted = [...calls].reverse(); // API returns newest-first; flip to oldest-first
+  const sorted = [...calls].reverse(); // the recorder answers newest-first; flip to oldest-first
   for (const call of sorted) {
     if (loadedIds.has(call.call_id)) continue;
     loadedIds.add(call.call_id);
     const srcList = call.src_list || [];
     const isEmergency = call.emergency || false;
     const sid = call.system_id || systemId;
+    // Where older history goes on from: the start of the oldest call shown.
+    if (ch && call.start_time && (!ch.oldestStartMs || call.start_time < ch.oldestStartMs)) ch.oldestStartMs = call.start_time;
 
     // Cache src_list for player segment display
     if (srcList.length > 0) callSrcLists.set(call.call_id, srcList);
@@ -2758,7 +2876,7 @@ function callsToMessages(calls, chanName, systemId) {
       const srcNick = unitIds.length > 0
         ? resolveNick(sid, unitIds[0], '')
         : (call.tg_alpha_tag || `TG ${call.tgid}`);
-      if (unitIds.length > 0) ensureUserInChannel(ch, chanName, sid, unitIds[0], '');
+      if (unitIds.length > 0 && ch) ensureUserInChannel(ch, chanName, sid, unitIds[0], '');
       const callTime = call.start_time ? new Date(call.start_time) : new Date();
       const dur = call.duration ? fmtDuration(call.duration) : '';
       msgs.push({
@@ -2772,55 +2890,21 @@ function callsToMessages(calls, chanName, systemId) {
         const txTime = tx.time ? new Date(tx.time) : (call.start_time ? new Date(call.start_time) : new Date());
         const dur = tx.duration ? fmtDuration(tx.duration) : '';
         if (ch) ensureUserInChannel(ch, chanName, sid, tx.src, tx.tag);
-        msgs.push({
-          ts: ts(txTime), date: txTime, nick, src: tx.src, callId: call.call_id,
+        msgs.push(Object.assign({
+          ts: ts(txTime), date: txTime, nick, src: tx.src,
           pos: tx.pos || 0, txDuration: tx.duration || 0,
           duration: dur, channel: chanName,
           emergency: isEmergency || tx.emergency === 1,
-        });
+        }, callFields(call, sid)));
       }
     } else {
-      const units = call.units || [];
-      const srcNick = units.length > 0
-        ? resolveNick(sid, units[0].unit_id, units[0].alpha_tag)
-        : (call.tg_alpha_tag || `TG ${call.tgid}`);
+      const srcNick = call.tg_alpha_tag || `TG ${call.tgid}`;
       const callTime = call.start_time ? new Date(call.start_time) : new Date();
       const dur = call.duration ? fmtDuration(call.duration) : '';
-      msgs.push({
-        ts: ts(callTime), date: callTime, nick: srcNick, callId: call.call_id,
+      msgs.push(Object.assign({
+        ts: ts(callTime), date: callTime, nick: srcNick,
         duration: dur, channel: chanName, emergency: isEmergency,
-      });
-    }
-  }
-  return msgs;
-}
-
-/** Convert API unit events into IRC-style message objects. Returns messages oldest-first. Deduplicates by event id. */
-function unitEventsToMessages(events, chanName) {
-  const msgs = [];
-  const ch = channels.get(chanName);
-  if (!channelLoadedEventIds.has(chanName)) channelLoadedEventIds.set(chanName, new Set());
-  const loadedIds = channelLoadedEventIds.get(chanName);
-
-  const sorted = [...events].reverse(); // API returns newest-first; flip to oldest-first
-  for (const evt of sorted) {
-    if (loadedIds.has(evt.id)) continue;
-    loadedIds.add(evt.id);
-
-    const nick = resolveNick(evt.system_id, evt.unit_rid, evt.unit_alpha_tag);
-    const evtTime = new Date(evt.time);
-
-    if (evt.event_type === 'join') {
-      if (ch) ensureUserInChannel(ch, chanName, evt.system_id, evt.unit_rid, evt.unit_alpha_tag);
-      msgs.push({
-        ts: ts(evtTime), date: evtTime,
-        kind: 'join', text: `${nick} has joined ${chanName}`,
-      });
-    } else if (evt.event_type === 'off') {
-      msgs.push({
-        ts: ts(evtTime), date: evtTime,
-        kind: 'quit', text: `${nick} has quit (Quit)`,
-      });
+      }, callFields(call, sid)));
     }
   }
   return msgs;
@@ -2841,27 +2925,19 @@ async function lazyLoadChannel(chanName, systemId, tgid) {
   if (!ch) { channelLoading.delete(chanName); return; }
 
   try {
-    // Time-cursor pagination: use oldest message's date as the upper bound
-    const oldest = ch.messages.length > 0 ? ch.messages[0].date : null;
-    const endParam = oldest ? `&end_time=${oldest.toISOString()}` : '';
+    // The recorder's call store (callsQuery), newest first. The next page goes on from the
+    // last one's cursor; the first from the start of the oldest call shown.
+    const q = { system: systemId, talkgroup: tgid, limit: HISTORY_PAGE_SIZE };
+    if (ch.historyCursor) q.cursor = ch.historyCursor;
+    else if (ch.oldestStartMs) q.to = ch.oldestStartMs;
+    const res = await queryCalls(q);
+    const calls = (res.entries || []).filter(e => e.record && !isDuplicateCopy(e)).map(entryToCall);
+    ch.historyCursor = res.next || null;
+    if (!res.next) ch.historyExhausted = true;
 
-    const [callData, eventData] = await Promise.all([
-      fetchJSON(`/calls?tgid=${tgid}&system_id=${systemId}&sort=-stop_time&deduplicate=true&limit=${HISTORY_PAGE_SIZE}${endParam}`),
-      fetchJSON(`/unit-events?tgid=${tgid}&system_id=${systemId}&type=join,off&sort=-time&limit=${HISTORY_PAGE_SIZE}${endParam}`),
-    ]);
-    const calls = callData.calls || [];
-    const events = eventData.events || [];
+    if (calls.length === 0) return;
 
-    if (calls.length < HISTORY_PAGE_SIZE && events.length < HISTORY_PAGE_SIZE) ch.historyExhausted = true;
-
-    if (calls.length === 0 && events.length === 0) {
-      channelLoading.delete(chanName);
-      return;
-    }
-
-    const callMsgs = callsToMessages(calls, chanName, systemId);
-    const eventMsgs = unitEventsToMessages(events, chanName);
-    const newMsgs = mergeByTime(callMsgs, eventMsgs);
+    const newMsgs = callsToMessages(calls, chanName, systemId);
 
     // Prepend older messages to the beginning of the channel's messages array
     ch.messages.unshift(...newMsgs);
@@ -2891,9 +2967,8 @@ async function lazyLoadChannel(chanName, systemId, tgid) {
     }
     renderTree();
 
-    // Fetch transcriptions for loaded calls (async, non-blocking)
-    const callIds = calls.map(c => c.call_id).filter(Boolean);
-    fetchTranscriptionsForCalls(callIds);
+    // Fetch transcripts for the loaded calls (async, non-blocking)
+    fetchTranscriptionsForCalls(calls.map(c => c.path));
   } catch (err) {
     serverMsgTo(chanName, `Failed to load history: ${err.message}`);
   } finally {
@@ -2934,36 +3009,42 @@ messagesEl.addEventListener('scroll', () => {
   lazyLoadChannel(activeChannel, ch.system_id, ch.tgid);
 });
 
-/** Load history for the starred channel by fetching recent calls from all favorited talkgroups */
+/** Load history for the starred channel: one callsQuery per favorited talkgroup, merged by time */
 async function loadStarredHistory() {
   const st = channels.get(STARRED_CHANNEL);
   if (!st || channelLoading.has(STARRED_CHANNEL)) return;
   channelLoading.add(STARRED_CHANNEL);
 
   try {
-    // Collect favorited talkgroups
+    // Collect favorited talkgroups ("shortName:tgid")
     const favTGs = [];
     for (const key of favorites) {
-      const [sysId, tgid] = key.split(':').map(Number);
+      const i = key.lastIndexOf(':');
+      const sysId = key.slice(0, i);
+      const tgid = Number(key.slice(i + 1));
       if (sysId && tgid) favTGs.push({ system_id: sysId, tgid });
     }
     if (favTGs.length === 0) {
       st.historyExhausted = true;
-      channelLoading.delete(STARRED_CHANNEL);
       return;
     }
 
-    // Time-cursor: use oldest message in starred channel
-    const oldest = st.messages.length > 0 ? st.messages[0].date : null;
-    const endParam = oldest ? `&end_time=${oldest.toISOString()}` : '';
+    // Time-cursor: everything that started before the oldest call in the starred channel
+    let oldest = st.oldestStartMs || null;
+    if (!oldest) {
+      const first = st.messages.find(m => m.date);
+      if (first) oldest = first.date.getTime();
+    }
 
     // Fetch from each favorited talkgroup in parallel (limited batch)
     const perTG = Math.max(3, Math.floor(20 / favTGs.length));
-    const fetches = favTGs.map(tg =>
-      fetchJSON(`/calls?tgid=${tg.tgid}&system_id=${tg.system_id}&sort=-stop_time&deduplicate=true&limit=${perTG}${endParam}`)
-        .then(data => ({ calls: data.calls || [], system_id: tg.system_id, tgid: tg.tgid }))
-        .catch(() => ({ calls: [], system_id: tg.system_id, tgid: tg.tgid }))
-    );
+    const fetches = favTGs.map(tg => {
+      const q = { system: tg.system_id, talkgroup: tg.tgid, limit: perTG };
+      if (oldest) q.to = oldest;
+      return queryCalls(q)
+        .then(data => ({ calls: (data.entries || []).filter(e => e.record && !isDuplicateCopy(e)).map(entryToCall), system_id: tg.system_id, tgid: tg.tgid }))
+        .catch(() => ({ calls: [], system_id: tg.system_id, tgid: tg.tgid }));
+    });
     const results = await Promise.all(fetches);
 
     // Merge all calls and convert to messages with origin tags
@@ -2981,11 +3062,7 @@ async function loadStarredHistory() {
     }
 
     // Sort newest-first then flip to oldest-first for message construction
-    allCalls.sort((a, b) => {
-      const ta = new Date(a.stop_time || a.start_time).getTime();
-      const tb = new Date(b.stop_time || b.start_time).getTime();
-      return tb - ta;
-    });
+    allCalls.sort((a, b) => (b.start_time || 0) - (a.start_time || 0));
 
     // Dedup by call_id
     if (!channelLoadedCallIds.has(STARRED_CHANNEL)) channelLoadedCallIds.set(STARRED_CHANNEL, new Set());
@@ -2995,6 +3072,7 @@ async function loadStarredHistory() {
     for (const call of allCalls.reverse()) { // oldest-first
       if (loadedIds.has(call.call_id)) continue;
       loadedIds.add(call.call_id);
+      if (call.start_time && (!st.oldestStartMs || call.start_time < st.oldestStartMs)) st.oldestStartMs = call.start_time;
 
       const systemId = call.system_id || call._origin_system_id;
       const chanName = resolveChannel(systemId, call.tgid);
@@ -3002,6 +3080,17 @@ async function loadStarredHistory() {
       const isEmergency = call.emergency || false;
 
       if (srcList.length > 0) callSrcLists.set(call.call_id, srcList);
+
+      if (call.encrypted) {
+        const callTime = new Date(call.start_time);
+        const dur = call.duration ? fmtDuration(call.duration) : '';
+        newMsgs.push({
+          ts: ts(callTime), date: callTime, encrypted: true,
+          nick: call.unit_ids.length ? resolveNick(systemId, call.unit_ids[0], '') : (call.tg_alpha_tag || 'TG ' + call.tgid),
+          text: `[encrypted${dur ? ', ' + dur : ''}]`, originChannel: chanName || null,
+        });
+        continue;
+      }
 
       const txList = srcList.length > 0
         ? [...srcList].sort((a, b) => (a.pos || 0) - (b.pos || 0))
@@ -3012,16 +3101,15 @@ async function loadStarredHistory() {
         const txTime = tx.time ? new Date(tx.time) : new Date(call.start_time);
         const dur = tx.duration ? fmtDuration(tx.duration) : (call.duration ? fmtDuration(call.duration) : '');
 
-        newMsgs.push({
+        newMsgs.push(Object.assign({
           ts: ts(txTime), date: txTime,
           nick, src: tx.src,
           pos: tx.pos || 0, txDuration: tx.duration || 0,
-          callId: call.call_id,
           duration: dur,
           channel: chanName || STARRED_CHANNEL,
           emergency: isEmergency || (tx.emergency === 1),
           originChannel: chanName || null,
-        });
+        }, callFields(call, systemId)));
       }
     }
 
@@ -3048,9 +3136,8 @@ async function loadStarredHistory() {
     }
     renderTree();
 
-    // Fetch transcriptions
-    const callIds = allCalls.map(c => c.call_id).filter(Boolean);
-    fetchTranscriptionsForCalls(callIds);
+    // Fetch transcripts
+    fetchTranscriptionsForCalls(allCalls.map(c => c.path));
   } catch (err) {
     console.error('Failed to load starred history:', err);
   } finally {
@@ -3060,50 +3147,85 @@ async function loadStarredHistory() {
 
 
 // ══════════════════════════════════════════════════════════════
-// API FETCHING — Bootstrap channels & nicklists
+// RECORDER API — queries over the recorder's connection (rec),
+// and the transcribe plugin's HTTP API
 // ══════════════════════════════════════════════════════════════
 
-async function fetchJSON(path) {
-  const res = await fetch(API_BASE + path);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${path}`);
+// Our own callsQuery / radioQuery, answered by id (callsResult / radioResult). The ids start
+// high, clear of client.js's own.
+const pendingQueries = new Map(); // id → { resolve, timer }
+let nextQueryId = 100000;
+
+function askRecorder(msg, timeoutMs = 20000) {
+  const id = nextQueryId++;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingQueries.delete(id);
+      reject(new Error(`no answer to ${msg.type} in ${timeoutMs / 1000} s`));
+    }, timeoutMs);
+    pendingQueries.set(id, { resolve, timer });
+    rec.send(Object.assign({}, msg, { id }));
+  });
+}
+
+function answerQuery(m) {
+  const q = pendingQueries.get(m.id);
+  if (!q) return;
+  pendingQueries.delete(m.id);
+  clearTimeout(q.timer);
+  q.resolve(m);
+}
+
+/** Recorded calls, newest first (callsQuery): { entries, next?, error? }. */
+function queryCalls(q) { return askRecorder(Object.assign({ type: 'callsQuery' }, q)); }
+
+/** The radio registry (radioQuery): what the recorder has heard of each system. */
+function queryRadio(q) { return askRecorder(Object.assign({ type: 'radioQuery' }, q)); }
+
+/** GET from the transcribe plugin. */
+async function fetchTranscribe(path) {
+  const res = await fetch(TRANSCRIBE_BASE + path);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} from ${TRANSCRIBE_BASE}${path}`);
   return res.json();
 }
 
-function extractCollectionItems(payload, preferredKeys = []) {
-  if (!payload || typeof payload !== 'object') return [];
-  if (Array.isArray(payload.items)) return payload.items;
-  for (const key of preferredKeys) {
-    if (Array.isArray(payload[key])) return payload[key];
+// ── Systems and talkgroups, from the recorder's config and talkgroup files ──
+
+/** Every system's short name and name (trunked, then conventional) into systemNames. */
+function loadSystemNames() {
+  const cfg = rec.config || {};
+  for (const s of (cfg.systems || []).concat(cfg.conventional || [])) {
+    if (s.shortName) systemNames.set(s.shortName, s.name || s.shortName);
   }
-  for (const [key, value] of Object.entries(payload)) {
-    if (['total', 'limit', 'offset'].includes(key)) continue;
-    if (Array.isArray(value)) return value;
-  }
-  return [];
 }
 
-async function fetchPaginatedCollection(path, preferredKeys = [], pageLimit = 1000) {
-  const collected = [];
-  let offset = 0;
-  let total = Infinity;
+/** A channel's tree folder: its talkgroup's category, under its system's name when there are several systems. */
+function groupFor(sys, category) {
+  const g = category || 'Ungrouped';
+  return systemNames.size > 1 ? `${systemNames.get(sys) || sys} / ${g}` : g;
+}
 
-  while (offset < total) {
-    const joiner = path.includes('?') ? '&' : '?';
-    const payload = await fetchJSON(`${path}${joiner}limit=${pageLimit}&offset=${offset}`);
-    const items = extractCollectionItems(payload, preferredKeys);
+/** A talkgroup's row in its system's talkgroup file (rec.talkgroups), or {}. */
+function tgMeta(sys, tgid) {
+  return (sys && rec.talkgroups(sys).get(tgid)) || {};
+}
 
-    if (!items.length) break;
+/** The channel of a system's talkgroup, made when it's new (named by its number when it isn't in the file). */
+function talkgroupChannel(sys, tgid, alphaTag) {
+  const existing = resolveChannel(sys, tgid);
+  if (existing) return existing;
+  const t = tgMeta(sys, tgid);
+  return ensureChannel({
+    system_id: sys, tgid,
+    alpha_tag: t.alphaTag || alphaTag || '',
+    description: t.description || '', tag: t.tag || '',
+    group: groupFor(sys, t.group),
+  });
+}
 
-    collected.push(...items);
-
-    const pageTotal = Number.isFinite(payload.total) ? payload.total : Number(payload.total);
-    total = Number.isFinite(pageTotal) && pageTotal > 0 ? pageTotal : offset + items.length;
-    offset += items.length;
-
-    if (items.length < pageLimit) break;
-  }
-
-  return collected;
+/** A radio's name as the recorder has it (unit names, then the alias heard), or "". */
+function recUnitName(sys, unit) {
+  return unit != null && sys ? rec.unitName(sys, unit) : '';
 }
 
 function applyPanelWidth(varName, width) {
@@ -3157,281 +3279,237 @@ function initResizablePanels() {
   attachResizer(nicklistResizerEl, 'right');
 }
 
-async function bootstrapChannels() {
-  serverMsg(`Fetching channel list from ${API_BASE}/talkgroups...`);
-  try {
-    const tgs = await fetchPaginatedCollection('/talkgroups?sort=alpha_tag', ['talkgroups'], 1000);
-    serverMsg(`Received ${tgs.length} talkgroups`);
-
-    for (const tg of tgs) {
-      const chanName = ensureChannel(tg);
-      // Initial join message
-      channels.get(chanName).messages.push({
-        ts: ts(), kind: 'notice',
-        text: `Now talking on ${chanName}`,
+function bootstrapChannels() {
+  loadSystemNames();
+  serverMsg(`Loading the talkgroups of ${[...systemNames.values()].join(', ') || 'no systems'}...`);
+  const tgs = [];
+  for (const sys of systemNames.keys()) {
+    for (const t of rec.talkgroups(sys).values()) {
+      tgs.push({
+        system_id: sys, tgid: t.talkgroup,
+        alpha_tag: t.alphaTag || '', description: t.description || '', tag: t.tag || '',
+        group: groupFor(sys, t.group), mode: t.mode || '',
       });
-      channels.get(chanName).messages.push({
-        ts: ts(), kind: 'topic',
-        text: `Topic for ${chanName}: ${tg.description || tg.alpha_tag} [${tg.tag || ''}]`,
-      });
-      if (tg.mode) {
-        channels.get(chanName).messages.push({
-          ts: ts(), kind: 'mode',
-          text: `${chanName} mode: ${tg.mode}`,
-        });
-      }
     }
-
-    serverMsg(`Joined ${channels.size - 1} channels`);
-
-    // Create starred meta-channel if user has favorites
-    updateStarredChannel();
-
-    renderTree();
-
-    // Auto-switch to first real channel
-    const firstChan = [...channels.keys()].find(k => k !== STATUS_CHANNEL && k !== STARRED_CHANNEL);
-    if (firstChan) switchChannel(firstChan);
-  } catch (err) {
-    serverMsg(`ERROR fetching talkgroups: ${err.message}`);
   }
+  tgs.sort((a, b) => (a.alpha_tag || String(a.tgid)).localeCompare(b.alpha_tag || String(b.tgid)));
+  serverMsg(`Received ${tgs.length} talkgroups`);
+  document.querySelector('.tree-header-text').textContent = [...systemNames.values()].join(', ') || 'trunk-pro';
+
+  for (const tg of tgs) {
+    const chanName = ensureChannel(tg);
+    // Initial join message
+    channels.get(chanName).messages.push({
+      ts: ts(), kind: 'notice',
+      text: `Now talking on ${chanName}`,
+    });
+    channels.get(chanName).messages.push({
+      ts: ts(), kind: 'topic',
+      text: `Topic for ${chanName}: ${tg.description || tg.alpha_tag || tg.tgid} [${tg.tag || ''}]`,
+    });
+    if (tg.mode) {
+      channels.get(chanName).messages.push({
+        ts: ts(), kind: 'mode',
+        text: `${chanName} mode: ${tg.mode}`,
+      });
+    }
+  }
+
+  serverMsg(`Joined ${channels.size - 1} channels`);
+
+  // Create starred meta-channel if user has favorites
+  updateStarredChannel();
+
+  renderTree();
+
+  // Auto-switch to first real channel
+  const firstChan = [...channels.keys()].find(k => k !== STATUS_CHANNEL && k !== STARRED_CHANNEL);
+  if (firstChan) switchChannel(firstChan);
 }
 
-async function bootstrapAffiliations() {
-  serverMsg('Fetching user affiliations...');
-  try {
-    const data = await fetchJSON('/unit-affiliations?limit=5000');
-    const affs = data.affiliations || [];
-    serverMsg(`Received ${affs.length} affiliations`);
+/** A talkgroup file replaced or edited: new talkgroups get channels, known ones their new topic. */
+function refreshTalkgroups(sys) {
+  if (!bootstrapped || !sys) return;
+  for (const t of rec.talkgroups(sys).values()) {
+    const chanName = resolveChannel(sys, t.talkgroup);
+    if (!chanName) { talkgroupChannel(sys, t.talkgroup, t.alphaTag); continue; }
+    const ch = channels.get(chanName);
+    if (!ch) continue;
+    ch.description = t.description || '';
+    ch.tag = t.tag || '';
+    ch.group = groupFor(sys, t.group);
+  }
+  renderTree();
+}
 
-    let userCount = 0;
-    let offlineCount = 0;
-    for (const aff of affs) {
-      const chanName = resolveChannel(aff.system_id, aff.tgid);
-      if (!chanName) continue;
+// Where each radio is affiliated now: "shortName:unit" → channel name.
+const unitAffChannel = new Map();
 
+/** The radios the recorder has heard (radioQuery units): their names, and the nicklists from where each is affiliated. */
+async function bootstrapUnits() {
+  serverMsg('Fetching the radios heard, and where each is affiliated...');
+  let seeded = 0;
+  let userCount = 0;
+  let offlineCount = 0;
+  const nowS = Date.now() / 1000;
+  for (const sys of systemNames.keys()) {
+    let res;
+    try {
+      res = await queryRadio({ what: 'units', system: sys, limit: 5000 });
+      if (res.error) throw new Error(res.error);
+    } catch (err) {
+      serverMsg(`ERROR fetching the radios of ${sys}: ${err.message}`);
+      continue;
+    }
+    for (const u of res.rows || []) {
+      if (u.alias && u.alias.trim()) {
+        resolveNick(sys, u.unit, u.alias, 'mqtt');
+        seeded++;
+      }
+      if (u.aff == null) continue;
+      const chanName = talkgroupChannel(sys, u.aff);
       const ch = channels.get(chanName);
       if (!ch) continue;
 
-      const nick = resolveNick(aff.system_id, aff.unit_id, aff.unit_alpha_tag);
+      const nick = resolveNick(sys, u.unit, u.alias);
       const role = roleForNick(nick);
       const prefix = role === 'op' ? '@' : '';
-      const online = aff.status === 'affiliated';
+      // Online: not deregistered, and heard in the last hour.
+      const online = u.reg !== false && nowS - (u.last || 0) < 3600;
 
-      const uk = unitKey(aff.system_id, aff.unit_id);
+      const uk = unitKey(sys, u.unit);
+      unitAffChannel.set(uk, chanName);
       if (!ch.users.has(uk)) {
-        ch.users.set(uk, { nick, prefix, role, unitId: aff.unit_id, systemId: aff.system_id, online });
+        ch.users.set(uk, { nick, prefix, role, unitId: u.unit, systemId: sys, affiliated: true, online });
         userCount++;
         if (!online) offlineCount++;
       }
     }
-
-    serverMsg(`${userCount} users loaded across channels (${userCount - offlineCount} online, ${offlineCount} offline)`);
-    renderNicklist();
-    renderTree();
-  } catch (err) {
-    serverMsg(`ERROR fetching affiliations: ${err.message}`);
+    serverMsg(`${sys}: ${(res.rows || []).length} of ${res.total ?? '?'} radios heard in ${res.hours ?? '?'} h`);
   }
+
+  serverMsg(`Seeded ${seeded} unit nicks from the radios heard`);
+  serverMsg(`${userCount} users loaded across channels (${userCount - offlineCount} online, ${offlineCount} offline)`);
+  renderNicklist();
+  renderTree();
 }
 
-async function bootstrapUnitNicks() {
-  serverMsg('Fetching unit directory...');
-  try {
-    const units = await fetchPaginatedCollection('/units?sort=alpha_tag', ['units'], 1000);
-    let seeded = 0;
-    for (const u of units) {
-      if (u.alpha_tag && u.alpha_tag.trim()) {
-        resolveNick(u.system_id, u.unit_id, u.alpha_tag, u.alpha_tag_source || 'mqtt');
-        seeded++;
-      }
-    }
-    serverMsg(`Seeded ${seeded} unit nicks from directory`);
-  } catch (err) {
-    serverMsg(`ERROR fetching units: ${err.message}`);
+/** The recorder's recent calls (rec.history, from hello) into their channels. */
+function bootstrapRecentCalls() {
+  const entries = rec.history || [];
+  serverMsg(`Loading the recorder's recent calls (${entries.length})...`);
+
+  // Group calls by channel
+  const callsByChannel = new Map();
+  let count = 0;
+  for (const entry of entries) {
+    if (!entry.record || isDuplicateCopy(entry)) continue;
+    const r = entry.record;
+    const chanName = talkgroupChannel(r.short_name, r.talkgroup, r.talkgroup_tag);
+    if (!chanName || !channels.has(chanName)) continue;
+    if (!callsByChannel.has(chanName)) callsByChannel.set(chanName, []);
+    callsByChannel.get(chanName).push(entryToCall(entry));
+    count++;
   }
+
+  // Track which channels got backfill messages (for unread counts)
+  const backfillCounts = new Map();
+  const paths = [];
+
+  for (const [chanName, chanCalls] of callsByChannel) {
+    const ch = channels.get(chanName);
+    if (!ch) continue;
+    const msgs = callsToMessages(chanCalls, chanName, ch.system_id);
+    ch.messages.push(...msgs);
+    if (msgs.length > 0) backfillCounts.set(chanName, msgs.length);
+    for (const c of chanCalls) paths.push(c.path);
+  }
+
+  // Set unread badges and activity flags for channels with backfill
+  for (const [chanName, count] of backfillCounts) {
+    channelHasActivity.add(chanName);
+    // Don't set unread for the currently active channel
+    if (chanName !== activeChannel) {
+      channelUnread.set(chanName, count);
+    }
+  }
+
+  serverMsg(`Loaded ${count} recent calls across ${backfillCounts.size} channels`);
+
+  // Re-render if we're on a channel that got backfill
+  if (activeChannel !== STATUS_CHANNEL) {
+    messagesEl.innerHTML = '';
+    lastRenderedDateStr = '';
+    const state = channels.get(activeChannel);
+    if (state) {
+      for (const m of state.messages) appendMsgDOM(m);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+  }
+
+  renderTree();
+
+  // Fetch transcripts for loaded calls (async, non-blocking)
+  fetchTranscriptionsForCalls(paths);
 }
 
-async function bootstrapRecentCalls() {
-  serverMsg('Fetching recent activity (30 min)...');
-  try {
-    const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-    const sysIds = [...new Set([...channels.values()].map(c => c.system_id).filter(Boolean))].join(',');
-    const [callData, eventData] = await Promise.all([
-      fetchJSON(`/calls?sort=-stop_time&deduplicate=true&limit=500&start_time=${since}`),
-      sysIds ? fetchJSON(`/unit-events?system_id=${sysIds}&type=join,off&sort=-time&limit=500&start_time=${since}`) : { events: [] },
-    ]);
-    const calls = callData.calls || [];
-    const events = eventData.events || [];
-
-    // Group calls by channel
-    const callsByChannel = new Map();
-    for (const call of calls) {
-      const chanName = resolveChannel(call.system_id, call.tgid);
-      if (!chanName || !channels.has(chanName)) continue;
-      if (!callsByChannel.has(chanName)) callsByChannel.set(chanName, []);
-      callsByChannel.get(chanName).push(call);
-    }
-
-    // Group unit events by channel
-    const eventsByChannel = new Map();
-    for (const evt of events) {
-      const chanName = evt.tgid ? resolveChannel(evt.system_id, evt.tgid) : null;
-      if (!chanName || !channels.has(chanName)) continue;
-      if (!eventsByChannel.has(chanName)) eventsByChannel.set(chanName, []);
-      eventsByChannel.get(chanName).push(evt);
-    }
-
-    // All channels that got either calls or events
-    const allChannels = new Set([...callsByChannel.keys(), ...eventsByChannel.keys()]);
-
-    // Track which channels got backfill messages (for unread counts)
-    const backfillCounts = new Map();
-
-    for (const chanName of allChannels) {
-      const ch = channels.get(chanName);
-      if (!ch) continue;
-
-      const chanCalls = callsByChannel.get(chanName) || [];
-      const chanEvents = eventsByChannel.get(chanName) || [];
-
-      const callMsgs = callsToMessages(chanCalls, chanName, ch.system_id);
-      const eventMsgs = unitEventsToMessages(chanEvents, chanName);
-      const merged = mergeByTime(callMsgs, eventMsgs);
-
-      ch.messages.push(...merged);
-      if (merged.length > 0) {
-        backfillCounts.set(chanName, merged.length);
-      }
-    }
-
-    // Set unread badges and activity flags for channels with backfill
-    for (const [chanName, count] of backfillCounts) {
-      channelHasActivity.add(chanName);
-      // Don't set unread for the currently active channel
-      if (chanName !== activeChannel) {
-        channelUnread.set(chanName, count);
-      }
-    }
-
-    serverMsg(`Loaded ${calls.length} recent calls and ${events.length} unit events across ${backfillCounts.size} channels`);
-
-    // Re-render if we're on a channel that got backfill
-    if (activeChannel !== STATUS_CHANNEL) {
-      messagesEl.innerHTML = '';
-      lastRenderedDateStr = '';
-      const state = channels.get(activeChannel);
-      if (state) {
-        for (const m of state.messages) appendMsgDOM(m);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
-    }
-
-    renderTree();
-
-    // Fetch transcriptions for loaded calls (async, non-blocking)
-    const callIds = calls.map(c => c.call_id).filter(Boolean);
-    fetchTranscriptionsForCalls(callIds);
-  } catch (err) {
-    serverMsg(`ERROR fetching recent activity: ${err.message}`);
-  }
+/** After a reconnect: the calls recorded while the connection was down (the greeting's history). */
+function catchUpHistory(sinceMs) {
+  const missed = (rec.history || []).filter(e => e.record && (e.record.start_time_ms || 0) >= sinceMs);
+  missed.reverse(); // oldest first
+  for (const e of missed) handleConcluded(e);
+  if (missed.length) serverMsg(`Caught up on ${missed.length} calls recorded while disconnected`);
 }
-
 
 // ══════════════════════════════════════════════════════════════
-// SSE — Real-time event stream
+// TRANSCRIPTS — the transcribe plugin's event stream (SSE)
 // ══════════════════════════════════════════════════════════════
 
-function connectSSE() {
+let transcriptState = 'off'; // connecting, connected, disconnected
+
+function connectTranscripts() {
   if (sseConnection) {
     sseConnection.close();
     sseConnection = null;
   }
 
-  setConnectionState('connecting');
+  const url = `${TRANSCRIBE_BASE}/api/v1/events`;
+  serverMsg(`Connecting to the transcripts at ${url}...`);
+  transcriptState = 'connecting';
 
-  const url = `${API_BASE}/events/stream`;
-  serverMsg(`Connecting to ${url}...`);
-
+  // No credentials; the browser resends Last-Event-ID when it reconnects, so nothing is missed.
   const es = new EventSource(url);
   sseConnection = es;
 
   es.onopen = () => {
-    setConnectionState('connected');
-    serverMsg('Connected to event stream');
+    if (transcriptState !== 'connected') serverMsg('Connected to the transcript stream');
+    transcriptState = 'connected';
   };
 
   es.onerror = () => {
-    if (connectionState === 'connected') {
-      serverMsg('Connection lost, reconnecting...');
+    if (transcriptState === 'connected') {
+      serverMsg('Transcript stream lost, reconnecting...');
+    } else if (transcriptState === 'connecting') {
+      serverMsg(`No transcripts from ${TRANSCRIBE_BASE} yet (is the transcribe plugin's http.port on, and this page's origin in its http.origins?). Retrying...`);
     }
-    setConnectionState('disconnected');
+    transcriptState = 'disconnected';
     // EventSource auto-reconnects
   };
 
-  // ── Call events ──
-  es.addEventListener('call_start', (e) => {
+  es.addEventListener('transcript', (e) => {
     lastEventId = e.lastEventId;
-    try { handleCallStart(JSON.parse(e.data)); } catch (err) { console.warn('bad call_start event:', err); }
+    try { handleTranscription(JSON.parse(e.data)); } catch (err) { console.warn('bad transcript event:', err); }
   });
+}
 
-  es.addEventListener('call_update', (e) => {
-    lastEventId = e.lastEventId;
-    try { handleCallUpdate(JSON.parse(e.data)); } catch (err) { console.warn('bad call_update event:', err); }
-  });
-
-  es.addEventListener('call_end', (e) => {
-    lastEventId = e.lastEventId;
-    try { handleCallEnd(JSON.parse(e.data)); } catch (err) { console.warn('bad call_end event:', err); }
-  });
-
-  // ── Unit events (with multi-site dedup) ──
-  es.addEventListener('unit_event', (e) => {
-    lastEventId = e.lastEventId;
-    try {
-      const evt = JSON.parse(e.data);
-      // Dedup: same system+unit+type+tgid within 10s window (mirrors backend dedup)
-      const dk = `${evt.system_id}:${evt.unit_id}:${evt.event_type}:${evt.tgid||0}`;
-      const now = Date.now();
-      if (liveUnitDedup.has(dk) && now - liveUnitDedup.get(dk) < 10000) return;
-      liveUnitDedup.set(dk, now);
-      // Prune old entries every 50 events
-      if (liveUnitDedup.size > 200) {
-        for (const [k, t] of liveUnitDedup) { if (now - t > 15000) liveUnitDedup.delete(k); }
-      }
-      handleUnitEvent(evt);
-    } catch (err) { console.warn('bad unit_event:', err); }
-  });
-
-  // ── Recorder updates (optional, show as server notices) ──
-  es.addEventListener('recorder_update', (e) => {
-    // Silent — could log to *status if desired
-  });
-
-es.addEventListener('rate_update', (e) => {
-  lastEventId = e.lastEventId;
-
-  try {
-    const data = JSON.parse(e.data);
-
-    if (data.decode_rate !== undefined) {
-      const rate = Number(data.decode_rate);
-
-      // Make sure this element exists
-      if (titlebarLag) {
-        titlebarLag.textContent = `decode: ${rate.toFixed(1)} msg/s`;
-      }
-    }
-  } catch (err) {
-    console.warn('bad rate_update event:', err);
+// The recorder's decode rate in the title bar: control channel messages a second, every site of every system.
+function showDecodeRate(m) {
+  let good = 0;
+  let any = false;
+  for (const [k, v] of Object.entries(m.values || {})) {
+    if (/^sys\/[^/]+\/(site\/.+\/)?cc\/good$/.test(k)) { good += Number(v) || 0; any = true; }
   }
-});
-  
- 
-  // ── Transcription events ──
-  es.addEventListener('transcription', (e) => {
-    lastEventId = e.lastEventId;
-    try { handleTranscription(JSON.parse(e.data)); } catch (err) { console.warn('bad transcription event:', err); }
-  });
+  if (any && titlebarLag) titlebarLag.textContent = `decode: ${good.toFixed(1)} msg/s`;
 }
 
 function setConnectionState(state) {
@@ -3454,115 +3532,111 @@ function setConnectionState(state) {
   }
 }
 
-
 // ══════════════════════════════════════════════════════════════
-// EVENT HANDLERS — Map SSE events to IRC actions
+// EVENT HANDLERS — calls, affiliations and transcripts to IRC actions
 // ══════════════════════════════════════════════════════════════
 
-/** Handle a transcription SSE event — inject text into existing call messages. */
-async function handleTranscription(data) {
-  const callId = data.call_id;
-  const chanName = resolveChannel(data.system_id, data.tgid);
-  if (!chanName) {
-    // Channel not created yet — cache with SSE text for later
-    pendingTranscriptions.set(callId, { fullText: data.text || '', segments: [], chanName: null });
+/** A transcript from the transcribe plugin (its event stream or a fetch). */
+function handleTranscription(t) {
+  applyTranscript(t);
+}
+
+/** Put a transcript on its call's messages wherever they are (its channel, the starred channel);
+ *  keep it for later when they aren't on the page yet (the call's recording hasn't come). */
+function applyTranscript(t) {
+  if (!t || !t.path) return;
+  const chanName = resolveChannel(t.system, t.talkgroup);
+  let applied = false;
+  if (chanName && applyTranscriptionToChannel(chanName, t.path, t)) applied = true;
+  if (channels.has(STARRED_CHANNEL) && applyTranscriptionToChannel(STARRED_CHANNEL, t.path, t)) applied = true;
+  if (applied) {
+    pendingTranscriptions.delete(t.path);
     return;
   }
-
-  const ch = channels.get(chanName);
-  if (!ch) {
-    pendingTranscriptions.set(callId, { fullText: data.text || '', segments: [], chanName });
-    return;
-  }
-
-  // Fetch full transcription with segments for per-unit text
-  let segments = [];
-  let fullText = data.text || '';
-  try {
-    const tx = await fetchJSON(`/calls/${callId}/transcription`);
-    if (tx.words && tx.words.segments) segments = tx.words.segments;
-    if (tx.text) fullText = tx.text;
-  } catch (err) {
-    // API fetch failed — use the full text from the SSE event
-  }
-
-  applyTranscriptionToChannel(ch, chanName, callId, fullText, segments);
-
-  // Also apply to starred channel if source channel is favorited
-  if (isFavorite(chanName) && channels.has(STARRED_CHANNEL)) {
-    const starred = channels.get(STARRED_CHANNEL);
-    applyTranscriptionToChannel(starred, STARRED_CHANNEL, callId, fullText, segments);
+  pendingTranscriptions.set(t.path, t);
+  // Evict stale entries if cache grows too large (calls never shown, or trimmed from scrollback)
+  if (pendingTranscriptions.size > 500) {
+    const keys = [...pendingTranscriptions.keys()];
+    for (let i = 0; i < keys.length - 400; i++) pendingTranscriptions.delete(keys[i]);
   }
 }
 
-/** Apply transcription text to messages in a channel, matching segments to units.
- *  Uses time-overlap matching: each segment has start/end (seconds from audio start),
- *  each message has pos/txDuration (seconds from audio start). Match by overlap. */
-function applyTranscriptionToChannel(ch, chanName, callId, fullText, segments) {
+/** Apply a transcript to a call's messages in one channel. One line per segment, the radio named
+ *  (a segment with no radio: the call's last talker, else "unknown"); the text alone when there
+ *  are no segments; a skipped or failed one's reason, muted. Returns whether the call was there. */
+function applyTranscriptionToChannel(chanName, callId, t) {
+  const ch = channels.get(chanName);
+  if (!ch) return false;
   const callMsgs = ch.messages.filter(m => m.callId === callId);
-  if (callMsgs.length === 0) {
-    // Messages not rendered yet — cache for when they appear
-    pendingTranscriptions.set(callId, { fullText, segments, chanName });
-    return;
+  if (callMsgs.length === 0) return false;
+  if (callMsgs.some(m => m.encrypted)) return true;
+
+  const base = callMsgs[0];
+  if (t.status !== 'ok') {
+    base.text = `[${t.status || 'no transcript'}${t.reason ? ': ' + t.reason : ''}]`;
+    base.textMuted = true;
+    if (chanName === activeChannel) refreshMsgEl(base);
+    return true;
   }
-  pendingTranscriptions.delete(callId);
 
-  if (segments.length > 0) {
-    const assigned = new Set();
+  const sid = base.systemId || t.system;
+  const talkers = base.talkers || [];
+  const lastTalker = talkers.length ? talkers[talkers.length - 1] : null;
+  const startMs = base.callStart || t.startMs || (base.date ? base.date.getTime() : Date.now());
+  const segs = (t.segments || []).filter(s => s && s.text && s.text.trim());
 
-    for (const seg of segments) {
-      if (seg.start === 0 && seg.end === 0 && segments.length > 1) continue; // skip empty segments
-
-      let bestIdx = -1;
-      let bestOverlap = -1;
-
-      for (let i = 0; i < callMsgs.length; i++) {
-        if (assigned.has(i)) continue;
-        const m = callMsgs[i];
-
-        // Time-overlap matching: segment start/end vs message pos/txDuration
-        if (m.pos !== undefined && m.txDuration > 0 && seg.end > 0) {
-          const mEnd = m.pos + m.txDuration;
-          const overlapStart = Math.max(seg.start, m.pos);
-          const overlapEnd = Math.min(seg.end, mEnd);
-          const overlap = overlapEnd - overlapStart;
-          if (overlap > bestOverlap) {
-            bestOverlap = overlap;
-            bestIdx = i;
-          }
-        } else if (m.src === seg.src && bestIdx === -1) {
-          // Fallback: src match (for messages without pos data)
-          bestIdx = i;
-        }
-      }
-
-      if (bestIdx >= 0) {
-        callMsgs[bestIdx].text = fmtTranscript(seg.text);
-        assigned.add(bestIdx);
-      }
-    }
-
-    // If nothing matched at all, fall back to simple assignment
-    if (assigned.size === 0) {
-      if (callMsgs.length === 1) {
-        callMsgs[0].text = fmtTranscript(fullText);
-      } else {
-        for (let i = 0; i < callMsgs.length && i < segments.length; i++) {
-          callMsgs[i].text = fmtTranscript(segments[i].text);
-        }
-      }
-    }
-  } else if (callMsgs.length === 1) {
-    callMsgs[0].text = fmtTranscript(fullText);
+  let lines;
+  if (segs.length > 0) {
+    lines = segs.map(s => {
+      const unit = s.unit != null ? s.unit : lastTalker;
+      const nick = unit != null ? resolveNick(sid, unit, '') : 'unknown';
+      const date = new Date(startMs + (s.start || 0) * 1000);
+      const len = Math.max(0, (s.end || 0) - (s.start || 0));
+      return Object.assign({}, base, {
+        ts: ts(date), date, nick, src: unit,
+        pos: s.start || 0, txDuration: len,
+        duration: len ? fmtDuration(len) : base.duration,
+        text: fmtTranscript(s.text), textMuted: false, _el: null,
+      });
+    });
   } else {
-    // No segments, multiple messages — put full text on first
-    callMsgs[0].text = fmtTranscript(fullText);
+    lines = [Object.assign({}, base, { text: fmtTranscript(t.text || ''), textMuted: false, _el: null })];
   }
+  replaceCallMessages(chanName, callMsgs, lines);
+  return true;
+}
 
-  // Targeted DOM update — only refresh messages whose text changed (no full re-render)
-  if (chanName === activeChannel) {
-    for (const m of callMsgs) refreshMsgEl(m);
+/** Swap a call's messages in a channel for new ones, in place (the array and, when shown, the DOM). */
+function replaceCallMessages(chanName, oldMsgs, newMsgs) {
+  const ch = channels.get(chanName);
+  if (!ch || oldMsgs.length === 0) return;
+  const idx = ch.messages.indexOf(oldMsgs[0]);
+  if (idx < 0) return;
+  const drop = new Set(oldMsgs);
+  ch.messages = ch.messages.filter(m => !drop.has(m));
+  ch.messages.splice(idx, 0, ...newMsgs);
+
+  if (chanName !== activeChannel) return;
+  const anchor = oldMsgs[0]._el;
+  if (!anchor || !anchor.parentNode) { reRenderChannel(chanName); return; }
+  const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  const playing = oldMsgs.some(m => m._el && m._el === currentPlayingMsgEl);
+  const frag = document.createDocumentFragment();
+  newMsgs.forEach((m, i) => {
+    const el = buildMsgEl(m);
+    if (newMsgs.length > 1) {
+      el.classList.add(i === 0 ? 'call-group-first' : i === newMsgs.length - 1 ? 'call-group-last' : 'call-group-mid');
+    }
+    m._el = el;
+    frag.appendChild(el);
+  });
+  anchor.parentNode.insertBefore(frag, anchor);
+  for (const m of oldMsgs) if (m._el) m._el.remove();
+  if (playing && newMsgs[0]._el) {
+    currentPlayingMsgEl = newMsgs[0]._el;
+    currentPlayingMsgEl.classList.add('now-playing');
   }
+  if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 /** Re-render the active channel's messages. */
@@ -3578,137 +3652,34 @@ function reRenderChannel(chanName) {
   else messagesEl.scrollTop = savedScroll;
 }
 
-/** Apply any pending transcriptions that arrived before messages were rendered. */
-function drainPendingTranscriptions(callIds, chanName) {
-  const ch = channels.get(chanName);
-  if (!ch) return;
-
+/** Apply any pending transcripts that arrived before their call's messages were rendered. */
+function drainPendingTranscriptions(callIds) {
   for (const callId of callIds) {
     const pending = pendingTranscriptions.get(callId);
-    if (pending) {
-      pendingTranscriptions.delete(callId);
-      const callMsgs = ch.messages.filter(m => m.callId === callId);
-      if (callMsgs.length > 0) {
-        applyTranscriptionToChannel(ch, chanName, callId, pending.fullText, pending.segments);
-      }
-    }
-  }
-
-  // Evict stale entries if cache grows too large (shouldn't happen in practice)
-  if (pendingTranscriptions.size > 200) {
-    const keys = [...pendingTranscriptions.keys()];
-    for (let i = 0; i < keys.length - 100; i++) pendingTranscriptions.delete(keys[i]);
+    if (pending) applyTranscript(pending);
   }
 }
 
-/** Batch-fetch transcriptions for a list of call IDs and apply to channel messages.
- *  Used by bootstrap/history-load paths for calls loaded from the API. */
-async function fetchTranscriptionsForCalls(callIds) {
-  if (callIds.length === 0) return;
+/** Fetch the transcripts of calls loaded from the recorder (history), by path, and apply them.
+ *  The plugin takes up to 200 paths a request; 50 keep the URL short. */
+const TRANSCRIPT_BATCH = 50;
+let transcribeErrorShown = 0;
 
-  const safeIds = callIds.filter(id => Number.isInteger(id) && id > 0);
-  if (safeIds.length === 0) return;
-
-  // Batch via /transcriptions/batch, fall back to individual fetches
-  const txMap = new Map();
-  let batchOk = false;
-
-  try {
-    const resp = await fetch(`${API_BASE}/transcriptions/batch?call_ids=${safeIds.join(',')}`);
-    if (resp.ok) {
-      batchOk = true;
-      const data = await resp.json();
-      for (const t of (data.transcriptions || [])) {
-        const segments = Array.isArray(t.segments) ? t.segments : [];
-        txMap.set(t.call_id, { text: t.text || '', segments });
+async function fetchTranscriptionsForCalls(paths) {
+  const want = [...new Set((paths || []).filter(Boolean))];
+  for (let i = 0; i < want.length; i += TRANSCRIPT_BATCH) {
+    const batch = want.slice(i, i + TRANSCRIPT_BATCH);
+    try {
+      const data = await fetchTranscribe(`/api/v1/transcripts?paths=${batch.map(encodeURIComponent).join(',')}`);
+      for (const t of (data.transcripts || [])) applyTranscript(t);
+    } catch (err) {
+      if (Date.now() - transcribeErrorShown > 60000) {
+        transcribeErrorShown = Date.now();
+        serverMsg(`Transcripts unavailable: ${err.message}`);
       }
-    }
-  } catch (err) { /* fall through to individual fetches */ }
-
-  if (!batchOk) {
-    // Fallback: fetch individually (throttled to avoid flooding)
-    const BATCH_SIZE = 6;
-    for (let i = 0; i < safeIds.length; i += BATCH_SIZE) {
-      const batch = safeIds.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map(id => fetchJSON(`/calls/${id}/transcription`).then(d => [id, d]).catch(() => null))
-      );
-      for (const r of results) {
-        if (r.status !== 'fulfilled' || !r.value) continue;
-        const [id, d] = r.value;
-        if (!d || !d.text) continue;
-        const segments = d.words?.segments || [];
-        txMap.set(id, { text: d.text, segments });
-      }
+      return;
     }
   }
-
-  // Apply to all channels
-  for (const [chanName, ch] of channels) {
-    const chanCallIds = new Set(ch.messages.filter(m => m.callId && txMap.has(m.callId)).map(m => m.callId));
-    for (const callId of chanCallIds) {
-      const tx = txMap.get(callId);
-      if (tx) applyTranscriptionToChannel(ch, chanName, callId, tx.text, tx.segments);
-    }
-  }
-}
-
-function handleCallStart(call) {
-  // Ensure channel exists
-  const chanName = ensureChannel({
-    system_id: call.system_id, tgid: call.tgid,
-    alpha_tag: call.tg_alpha_tag, description: call.tg_description,
-    tag: call.tg_tag, group: call.tg_group,
-  });
-
-  const ch = channels.get(chanName);
-  if (!ch) return;
-
-  // Identify first speaker from src_list (preferred) or units fallback
-  const srcList = call.src_list || [];
-  const units = call.units || [];
-  let srcNick = null;
-
-  if (srcList.length > 0) {
-    srcNick = resolveNick(call.system_id, srcList[0].src, srcList[0].tag);
-    ensureUserInChannel(ch, chanName, call.system_id, srcList[0].src, srcList[0].tag);
-  } else if (units.length > 0) {
-    srcNick = resolveNick(call.system_id, units[0].unit_id, units[0].alpha_tag);
-    ensureUserInChannel(ch, chanName, call.system_id, units[0].unit_id, units[0].alpha_tag);
-  } else if (call.unit) {
-    srcNick = resolveNick(call.system_id, call.unit, call.unit_alpha_tag);
-    ensureUserInChannel(ch, chanName, call.system_id, call.unit, call.unit_alpha_tag);
-  }
-
-  // Track active call — store src count so call_update can detect new transmissions
-  activeCalls.set(call.call_id, {
-    tgid: call.tgid, system_id: call.system_id,
-    chanName, start: Date.now(),
-    srcCount: srcList.length,
-  });
-
-  // Show typing indicator for primary speaker
-  if (srcNick) showTyping(chanName, srcNick);
-
-  // Emergency handling
-  if (call.emergency) {
-    addMsg(chanName, {
-      ts: ts(), kind: 'notice', emergency: true,
-      text: `*** EMERGENCY *** ${srcNick || 'unknown'} — emergency call on ${chanName}`,
-    });
-  }
-
-  // Encrypted call — show immediately since we won't get transcript content
-  if (call.encrypted) {
-    addMsg(chanName, {
-      ts: ts(), nick: srcNick || chanName, encrypted: true,
-      callId: call.call_id,
-      text: `[encrypted]`,
-    });
-    clearTyping(chanName);
-  }
-
-  renderTree();
 }
 
 /** Ensure a unit is in a channel's nicklist */
@@ -3726,359 +3697,249 @@ function ensureUserInChannel(ch, chanName, systemId, unitId, alphaTag) {
   if (chanName === activeChannel) renderNicklist();
 }
 
-function handleCallUpdate(call) {
-  const tracked = activeCalls.get(call.call_id);
-  if (!tracked) return;
+// ── Calls on the air (rec.calls, each status) ──
+// "<CallView.id>:<talkgroup>" → { key, id, sys, tgid, chanName, startMs, sources, state, entry, preexisting, ... }
+const liveCalls = new Map();
+// Recorded calls that left the air before their recording (concluded) came: shown without audio until it does.
+let awaitingPath = [];
+// False until the first status after each hello: the calls on the air then are not new.
+let syncedSinceHello = false;
 
-  const chanName = tracked.chanName;
-  const ch = channels.get(chanName);
-  if (!ch) return;
+function liveKey(c) { return `${c.id}:${c.talkgroup}`; }
 
-  const srcList = call.src_list || [];
-  const systemId = call.system_id || tracked.system_id;
+/** The calls on the air now against those last time: new ones start, changed ones update, gone ones end. */
+function syncCalls() {
+  if (!bootstrapped) return;
+  const calls = rec.calls || [];
+  const nowS = rec.status ? rec.status.nowS : 0;
+  const present = new Set(calls.map(liveKey));
 
-  // Detect new transmissions added since last update
-  if (srcList.length > tracked.srcCount) {
-    // New key-ups since we last saw this call
-    for (let i = tracked.srcCount; i < srcList.length; i++) {
-      const tx = srcList[i];
-      const nick = resolveNick(systemId, tx.src, tx.tag);
-      ensureUserInChannel(ch, chanName, systemId, tx.src, tx.tag);
-      showTyping(chanName, nick);
+  for (const [key, lc] of liveCalls) {
+    if (present.has(key)) continue;
+    liveCalls.delete(key);
+    endLiveCall(lc);
+  }
+
+  for (const c of calls) {
+    const key = liveKey(c);
+    let lc = liveCalls.get(key);
+    if (!lc) {
+      const sys = c.systemName || systemName(rec.status, c.system);
+      lc = {
+        key, id: c.id, sys, tgid: c.talkgroup,
+        chanName: talkgroupChannel(sys, c.talkgroup, c.alphaTag),
+        // Engine seconds → wall clock, once, when the call is first seen.
+        startMs: Date.now() - Math.max(0, nowS - c.startS) * 1000,
+        sources: [], entry: null, encMsg: null,
+        // On the air when we connected: its start wasn't seen; its recording is shown when it comes.
+        preexisting: !syncedSinceHello,
+      };
+      liveCalls.set(key, lc);
+      startLiveCall(lc, c);
     }
-    tracked.srcCount = srcList.length;
-  } else if (srcList.length > 0) {
-    // No new transmissions, but refresh typing for latest speaker
-    const last = srcList[srcList.length - 1];
-    showTyping(chanName, resolveNick(systemId, last.src, last.tag));
+    updateLiveCall(lc, c);
   }
+  syncedSinceHello = true;
 
-  // Also pick up any new units from the units array
-  const units = call.units || [];
-  for (const u of units) {
-    ensureUserInChannel(ch, chanName, systemId, u.unit_id, u.alpha_tag);
-  }
+  // Give up on recordings that never came (a call too short to keep, say).
+  const cutoff = Date.now() - 60000;
+  if (awaitingPath.length) awaitingPath = awaitingPath.filter(lc => lc.endedMs > cutoff);
 }
 
-function handleCallEnd(call) {
-  const tracked = activeCalls.get(call.call_id);
-  activeCalls.delete(call.call_id);
+/** A call came on the air: the typing indicator, an emergency notice, an encrypted call's line. */
+function startLiveCall(lc, c) {
+  if (lc.preexisting) return;
+  const ch = channels.get(lc.chanName);
+  if (!ch) return;
+  const first = (c.sources || [])[0];
+  let srcNick = null;
+  if (first != null) {
+    srcNick = resolveNick(lc.sys, first, '');
+    ensureUserInChannel(ch, lc.chanName, lc.sys, first, '');
+  }
 
-  let chanName = tracked
-    ? tracked.chanName
-    : resolveChannel(call.system_id, call.tgid);
-  if (!chanName) {
-    // Missed call_start — create channel from call_end metadata
-    chanName = ensureChannel({
-      system_id: call.system_id, tgid: call.tgid,
-      alpha_tag: call.tg_alpha_tag,
+  // Show typing indicator for primary speaker
+  if (srcNick && c.state === 'recording') showTyping(lc.chanName, srcNick);
+
+  // Emergency handling
+  if (c.emergency) {
+    addMsg(lc.chanName, {
+      ts: ts(), kind: 'notice', emergency: true,
+      text: `*** EMERGENCY *** ${srcNick || 'unknown'} — emergency call on ${lc.chanName}`,
     });
   }
-  if (!chanName) return;
 
-  clearTyping(chanName);
+  // Encrypted call (and not being decrypted) — show immediately since we won't get transcript content
+  if (c.encrypted && !c.decrypted) {
+    lc.encMsg = {
+      ts: ts(), date: new Date(), nick: srcNick || lc.chanName, encrypted: true,
+      callId: lc.key, text: '[encrypted]',
+    };
+    addMsg(lc.chanName, lc.encMsg);
+    clearTyping(lc.chanName);
+  }
 
-  const ch = channels.get(chanName);
+  renderTree();
+}
+
+/** A call on the air changed: new talkers join the nicklist and type. */
+function updateLiveCall(lc, c) {
+  lc.state = c.state;
+  lc.encrypted = !!c.encrypted && !c.decrypted;
+  lc.emergency = !!c.emergency;
+  const srcs = c.sources || [];
+  const added = srcs.filter(u => !lc.sources.includes(u));
+  lc.sources = srcs.slice();
+  if (lc.preexisting || lc.encrypted || c.state !== 'recording') return;
+  const ch = channels.get(lc.chanName);
+  if (!ch) return;
+  for (const u of added) ensureUserInChannel(ch, lc.chanName, lc.sys, u, '');
+  // Keep the indicator up for whoever talks last while the call is on the air.
+  if (srcs.length > 0) showTyping(lc.chanName, resolveNick(lc.sys, srcs[srcs.length - 1], ''));
+}
+
+/** A call left the air: its message, from its recording when that came already, else a line per talker until it does. */
+function endLiveCall(lc) {
+  clearTyping(lc.chanName);
+  if (lc.preexisting) return;
+  const ch = channels.get(lc.chanName);
   if (!ch) return;
 
-  const isEmergency = call.emergency || false;
-
-  if (call.encrypted) {
-    // Update the call_start placeholder with duration now that we know it
-    if (ch && call.duration) {
-      const dur = fmtDuration(call.duration);
-      for (let i = ch.messages.length - 1; i >= 0; i--) {
-        if (ch.messages[i].callId === call.call_id && ch.messages[i].encrypted) {
-          ch.messages[i].text = `[encrypted, ${dur}]`;
-          if (chanName === activeChannel) renderMessages();
-          break;
-        }
-      }
-    }
+  if (lc.encMsg) {
+    // Update the placeholder with the duration now that we know it
+    lc.encMsg.text = `[encrypted, ${fmtDuration((Date.now() - lc.startMs) / 1000)}]`;
+    if (lc.chanName === activeChannel) refreshMsgEl(lc.encMsg);
     return;
   }
+  // Followed but not recorded (ignored, unknown talkgroup, no recorder free): nothing to show.
+  if (lc.state !== 'recording') return;
 
-  // Skip if this call was already rendered (e.g. from bootstrap/lazy load)
-  const loadedIds = channelLoadedCallIds.get(chanName);
-  if (loadedIds && loadedIds.has(call.call_id)) return;
+  if (lc.entry) { renderEntry(lc.entry, lc.chanName); return; }
 
-  const srcList = call.src_list || [];
-  if (srcList.length > 0) {
-    // src_list available — render per-unit messages immediately
-    renderCallTransmissions(chanName, call.call_id, call.system_id, srcList, isEmergency);
-  } else {
-    // Render a placeholder message immediately, then try to upgrade with per-unit detail
-    const dur = call.duration ? fmtDuration(call.duration) : '';
-    const nick = call.tg_alpha_tag || `TG ${call.tgid}`;
-    addMsg(chanName, {
-      ts: ts(), nick,
-      callId: call.call_id,
-      duration: dur,
-      channel: chanName,
-      emergency: isEmergency,
+  const date = new Date(lc.startMs);
+  const talkers = lc.sources.length ? lc.sources : [null];
+  for (const u of talkers) {
+    addMsg(lc.chanName, {
+      ts: ts(date), date,
+      nick: u != null ? resolveNick(lc.sys, u, '') : lc.chanName, src: u,
+      callId: lc.key, channel: lc.chanName, emergency: lc.emergency,
+      systemId: lc.sys, callStart: lc.startMs, talkers: lc.sources.slice(),
     });
-    drainPendingTranscriptions([call.call_id], chanName);
-
-    // Background fetch: if audio handler has already populated src_list, upgrade to per-unit messages
-    upgradeCallWithSrcList(call.call_id, chanName, call.system_id, isEmergency);
   }
-
-  // Scanner: enqueue for auto-play if this channel is scanned
-  if (call.audio_file_path || (srcList && srcList.length > 0)) {
-    const nick = (srcList && srcList.length > 0)
-      ? resolveNick(call.system_id, srcList[0].src, srcList[0].tag)
-      : (call.tg_alpha_tag || `TG ${call.tgid}`);
-    scannerEnqueue(call.call_id, nick, chanName, isEmergency);
-  }
+  lc.endedMs = Date.now();
+  awaitingPath.push(lc);
 }
 
-/** Try to upgrade a fallback call message to per-transmission messages.
- *  If the audio handler has already populated src_list, replace the single
- *  placeholder with one message per key-up. Then fetch and apply transcription
- *  to prevent race condition with handleTranscription.
- *
- *  The audio MQTT message is processed AFTER call_end, so src_list and
- *  transcription may not be available on the first attempt. When src_list is
- *  empty, a delayed retry (2s) gives the audio handler time to finish. */
-async function upgradeCallWithSrcList(callId, chanName, systemId, isEmergency, _retryCount = 0) {
-  try {
-    const data = await fetchJSON(`/calls/${callId}`);
-    const srcList = data.src_list || [];
-    if (srcList.length === 0) {
-      // Audio not processed yet — retry once after delay
-      if (_retryCount < 1) {
-        setTimeout(() => upgradeCallWithSrcList(callId, chanName, systemId, isEmergency, _retryCount + 1), 2000);
-      }
-      return;
-    }
+/** A call was recorded (concluded): it gives its live call's messages their path, or is shown as it is. */
+function handleConcluded(entry) {
+  if (!bootstrapped || !entry || !entry.record) return;
+  const r = entry.record;
+  // Another site's copy of a call shown already.
+  if (isDuplicateCopy(entry)) return;
+  const sys = r.short_name;
+  const chanName = talkgroupChannel(sys, r.talkgroup, r.talkgroup_tag);
+  const loaded = channelLoadedCallIds.get(chanName);
+  if (loaded && loaded.has(entry.path)) return;
 
-    const ch = channels.get(chanName);
-    if (!ch) return;
-
-    // Remove the placeholder message for this call
-    const idx = ch.messages.findIndex(m => m.callId === callId);
-    if (idx !== -1) ch.messages.splice(idx, 1);
-
-    // Render per-transmission messages in its place
-    renderCallTransmissions(chanName, callId, data.system_id || systemId, srcList, data.emergency || isEmergency);
-
-    // Re-render if active (renderCallTransmissions only appends DOM for active channel,
-    // but we removed a message so a full re-render is cleaner)
-    if (chanName === activeChannel) reRenderChannel(chanName);
-
-    // Always fetch and apply transcription after upgrade — this covers the race
-    // where handleTranscription applied text to the now-removed placeholder
-    try {
-      const tx = await fetchJSON(`/calls/${callId}/transcription`);
-      if (tx.text) {
-        const segments = (tx.words && tx.words.segments) || [];
-        applyTranscriptionToChannel(ch, chanName, callId, tx.text, segments);
-      }
-    } catch (_) {
-      // Transcription not available yet — handleTranscription SSE will apply it later
-    }
-  } catch (err) {
-    // Fetch failed — keep placeholder, transcription will still be applied via SSE/cache
+  // Its live call: same system and talkgroup, started within 3 s. The first match wins.
+  const startMs = r.start_time_ms || (r.start_time || 0) * 1000;
+  const near = lc => !lc.preexisting && !lc.entry && lc.sys === sys && lc.tgid === r.talkgroup && Math.abs(lc.startMs - startMs) <= 3000;
+  for (const lc of liveCalls.values()) {
+    if (near(lc)) { lc.entry = entry; return; } // shown when it leaves the air
   }
+  const i = awaitingPath.findIndex(near);
+  if (i >= 0) {
+    const lc = awaitingPath.splice(i, 1)[0];
+    lc.entry = entry;
+    upgradeLiveMessages(lc, entry);
+    return;
+  }
+  renderEntry(entry, chanName);
 }
 
-/** Render per-transmission voice messages from a call's src_list. */
-function renderCallTransmissions(chanName, callId, systemId, srcList, isEmergency) {
+/** A recorded call's messages, appended to its channel. */
+function renderEntry(entry, chanName) {
+  const call = entryToCall(entry);
+  const msgs = callsToMessages([call], chanName, call.system_id);
+  for (const m of msgs) addMsg(chanName, m);
+  drainPendingTranscriptions([call.call_id]);
+  enqueueRecorded(call, chanName, msgs);
+}
+
+/** A live call's lines (no audio yet) replaced by its recording's, in its channel and the starred channel. */
+function upgradeLiveMessages(lc, entry) {
+  const chanName = lc.chanName;
   const ch = channels.get(chanName);
   if (!ch) return;
-
-  // Cache src_list for player segment display
-  if (srcList.length > 0) callSrcLists.set(callId, srcList);
-
-  const sorted = [...srcList].sort((a, b) => (a.pos || 0) - (b.pos || 0));
-  for (const tx of sorted) {
-    const nick = resolveNick(systemId, tx.src, tx.tag);
-    ensureUserInChannel(ch, chanName, systemId, tx.src, tx.tag);
-
-    const txTime = tx.time ? new Date(tx.time) : new Date();
-    const dur = tx.duration ? fmtDuration(tx.duration) : '';
-    const txEmergency = tx.emergency === 1;
-
-    addMsg(chanName, {
-      ts: ts(txTime), date: txTime,
-      nick, src: tx.src,
-      pos: tx.pos || 0, txDuration: tx.duration || 0,
-      callId,
-      duration: dur,
-      channel: chanName,
-      emergency: isEmergency || txEmergency,
-    });
+  const call = entryToCall(entry);
+  const newMsgs = callsToMessages([call], chanName, call.system_id);
+  const old = ch.messages.filter(m => m.callId === lc.key);
+  if (old.length) replaceCallMessages(chanName, old, newMsgs);
+  else for (const m of newMsgs) addMsg(chanName, m);
+  const st = channels.get(STARRED_CHANNEL);
+  if (st && old.length) {
+    const oldStarred = st.messages.filter(m => m.callId === lc.key);
+    if (oldStarred.length) {
+      replaceCallMessages(STARRED_CHANNEL, oldStarred, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
+    }
   }
-
-  // Apply any transcriptions that arrived before these messages were rendered
-  drainPendingTranscriptions([callId], chanName);
+  drainPendingTranscriptions([call.call_id]);
+  enqueueRecorded(call, chanName, newMsgs);
 }
 
-function handleUnitEvent(evt) {
-  const systemId = evt.system_id;
-  const unitId = evt.unit_id;
-  const nick = resolveNick(systemId, unitId, evt.unit_alpha_tag);
-  const tgid = evt.tgid;
+/** Scanner: queue a recorded call for auto-play if its channel is scanned. */
+function enqueueRecorded(call, chanName, msgs) {
+  if (call.encrypted || !call.audio || msgs.length === 0 || !msgs[0].path) return;
+  scannerEnqueue(call.path, msgs[0].nick, chanName, call.emergency);
+}
 
-  // Resolve or create channel
-  let chanName = tgid ? resolveChannel(systemId, tgid) : null;
-  if (!chanName && tgid) {
-    chanName = ensureChannel({
-      system_id: systemId, tgid,
-      alpha_tag: evt.tg_alpha_tag, description: evt.tg_description,
-      tag: '', group: 'Ungrouped',
+/** A radio affiliated with a talkgroup (monitorEvent unitAffiliated, topic activity): it parts its
+ *  old channel and joins the new one. */
+function handleAffiliation(evt) {
+  const systemId = evt.system;
+  const unitId = evt.unit;
+  const tgid = evt.talkgroup;
+  if (!systemId || unitId == null || tgid == null) return;
+
+  // Dedup: same system+unit+talkgroup within 10s (several sites hear one affiliation)
+  const dk = `${systemId}:${unitId}:aff:${tgid}`;
+  const now = Date.now();
+  if (liveUnitDedup.has(dk) && now - liveUnitDedup.get(dk) < 10000) return;
+  liveUnitDedup.set(dk, now);
+  if (liveUnitDedup.size > 200) {
+    for (const [k, t] of liveUnitDedup) { if (now - t > 15000) liveUnitDedup.delete(k); }
+  }
+
+  const nick = resolveNick(systemId, unitId, evt.alias || '');
+  const chanName = talkgroupChannel(systemId, tgid, evt.alphaTag);
+  const ch = channels.get(chanName);
+  if (!ch) return;
+  const jk = unitKey(systemId, unitId);
+
+  // Part the channel it was affiliated with
+  const oldChan = unitAffChannel.get(jk);
+  if (oldChan && oldChan !== chanName && channels.has(oldChan)) {
+    const oc = channels.get(oldChan);
+    if (oc.users.delete(jk)) {
+      addMsg(oldChan, { ts: ts(), kind: 'part', text: `${nick} has left ${oldChan}` });
+      if (oldChan === activeChannel) renderNicklist();
+    }
+  }
+  unitAffChannel.set(jk, chanName);
+
+  // Talkgroup affiliation → IRC JOIN
+  const u = ch.users.get(jk);
+  if (!u || !u.affiliated) {
+    const role = roleForNick(nick);
+    ch.users.set(jk, { nick, prefix: role === 'op' ? '@' : '', role, unitId, systemId, affiliated: true, online: true });
+    addMsg(chanName, {
+      ts: ts(), kind: 'join',
+      text: `${nick} has joined ${chanName}${ch.tag ? ' [' + ch.tag + ']' : ''}`,
     });
-    renderTree();
+  } else {
+    u.online = true;
   }
-
-  switch (evt.event_type) {
-    case 'join': {
-      // Talkgroup affiliation → IRC JOIN
-      if (!chanName) break;
-      const ch = channels.get(chanName);
-      if (!ch) break;
-
-      const jk = unitKey(systemId, unitId);
-      if (!ch.users.has(jk)) {
-        const role = roleForNick(nick);
-        ch.users.set(jk, { nick, prefix: role === 'op' ? '@' : '', role, unitId, systemId, affiliated: true, online: true });
-
-        addMsg(chanName, {
-          ts: ts(), kind: 'join',
-          text: `${nick} has joined ${chanName}${ch.tag ? ' [' + ch.tag + ']' : ''}`,
-        });
-        if (chanName === activeChannel) renderNicklist();
-      } else {
-        // Mark as affiliated and online
-        const u = ch.users.get(jk);
-        u.affiliated = true;
-        u.online = true;
-        if (chanName === activeChannel) renderNicklist();
-      }
-      break;
-    }
-
-    case 'off': {
-      // Unit deregistration → mark offline (dimmed in nicklist)
-      const ok = unitKey(systemId, unitId);
-      let quitChannel = null;
-      for (const [chName, ch] of channels) {
-        if (ch.users.has(ok)) {
-          const u = ch.users.get(ok);
-          u.online = false;
-          if (!quitChannel) quitChannel = chName; // first channel gets the quit message
-          if (chName === activeChannel) renderNicklist();
-        }
-      }
-      if (quitChannel) {
-        addMsg(quitChannel, {
-          ts: ts(), kind: 'quit',
-          text: `${nick} has quit (Quit)`,
-        });
-      } else {
-        serverMsg(`${nick} has disconnected`);
-      }
-      break;
-    }
-
-    case 'on': {
-      // Unit registration → mark online in any channels it's in
-      const onk = unitKey(systemId, unitId);
-      for (const [chName, ch] of channels) {
-        if (ch.users.has(onk)) {
-          const u = ch.users.get(onk);
-          u.online = true;
-          if (chName === activeChannel) renderNicklist();
-        }
-      }
-      serverMsg(`${nick} has connected to the network`);
-      break;
-    }
-
-    case 'call': {
-      // Channel grant / voice call — show typing
-      if (chanName) {
-        showTyping(chanName, nick);
-        // Temporarily add user to channel if not already present (e.g. patched talkgroup)
-        const ck = unitKey(systemId, unitId);
-        const ch = channels.get(chanName);
-        if (ch && !ch.users.has(ck)) {
-          const role = roleForNick(nick);
-          ch.users.set(ck, { nick, prefix: role === 'op' ? '@' : '', role, unitId, systemId, affiliated: false, online: true });
-          if (chanName === activeChannel) renderNicklist();
-        }
-      }
-      break;
-    }
-
-    case 'end': {
-      // Per-unit end of transmission — remove from channel if not affiliated
-      if (chanName) {
-        clearTyping(chanName);
-        const ek = unitKey(systemId, unitId);
-        const ch = channels.get(chanName);
-        if (ch) {
-          const u = ch.users.get(ek);
-          if (u && !u.affiliated) {
-            ch.users.delete(ek);
-            if (chanName === activeChannel) renderNicklist();
-          }
-        }
-      }
-      break;
-    }
-
-    case 'location': {
-      // Silent — could show as CTCP or notice
-      break;
-    }
-
-    case 'ackresp':
-    case 'data':
-    case 'ans_req': {
-      // Data/signaling — silent
-      break;
-    }
-
-    case 'signal': {
-      // Analog signaling (MDC1200, FleetSync, STAR) — show in channel
-      if (!chanName && tgid) {
-        chanName = ensureChannel({
-          system_id: systemId, tgid,
-          alpha_tag: evt.tg_alpha_tag, description: evt.tg_description,
-          tag: '', group: 'Ungrouped',
-        });
-        renderTree();
-      }
-      if (chanName) {
-        const ck = unitKey(systemId, unitId);
-        const ch = channels.get(chanName);
-        if (ch && !ch.users.has(ck)) {
-          const role = roleForNick(nick);
-          ch.users.set(ck, { nick, prefix: role === 'op' ? '@' : '', role, unitId, systemId, affiliated: false, online: true });
-          if (chanName === activeChannel) renderNicklist();
-        }
-        const sigType = (evt.signal_type || 'signal').toUpperCase();
-        addMsg(chanName, {
-          ts: ts(), kind: 'notice',
-          text: `${nick} sent ${sigType} signal`,
-        });
-      }
-      break;
-    }
-
-    case 'call_alert': {
-      // Directed unit-to-unit page (P25 TSBK 0x1F) — no talkgroup, post to *status
-      const targetId = evt.target_unit;
-      const targetTag = evt.target_unit_alpha_tag;
-      const targetNick = targetId ? resolveNick(systemId, targetId, targetTag) : '?';
-      serverMsg(`\u{1F6A8} CALL ALERT: ${nick} \u2192 ${targetNick}`);
-      break;
-    }
-
-    default:
-      break;
-  }
+  if (chanName === activeChannel || activeChannel === STARRED_CHANNEL) renderNicklist();
 }
 
 
@@ -4114,7 +3975,7 @@ inputField.addEventListener('keydown', (e) => {
     handleCommand(val);
   } else {
     // Read-only: can't send messages to radio channels
-    addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'This client is read-only (Layer 1). Messages cannot be sent.' });
+    addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'This client is read-only (listen access). Messages cannot be sent.' });
   }
 });
 
@@ -4194,7 +4055,7 @@ function handleCommand(cmd) {
       }
       if (onChans.length > 0) {
         addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `[${target}] is on channels: ${onChans.join(' ')}` });
-        addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `[${target}] connected via tr-engine` });
+        addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `[${target}] connected via Trunk Recorder Pro${rec.version ? ' ' + rec.version : ''}` });
         addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `— End of /WHOIS —` });
       } else {
         addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `No such nick: ${target}` });
@@ -4277,12 +4138,31 @@ function handleCommand(cmd) {
       break;
 
     case '/reconnect':
-      connectSSE();
+      // The recorder's connection reconnects by itself; this reopens the transcript stream.
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Recorder: ${rec.connected ? 'connected' : 'reconnecting'} (it reconnects by itself)` });
+      connectTranscripts();
       break;
 
-    case '/api':
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `API base: ${API_BASE}` });
+    case '/api': {
+      const arg = parts[1];
+      if (arg === 'reset') {
+        localStorage.removeItem('irc_transcribe');
+        TRANSCRIBE_BASE = TRANSCRIBE_DEFAULT;
+        connectTranscripts();
+      } else if (arg) {
+        if (!/^https?:\/\//.test(arg)) {
+          addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'Usage: /api http://host:port — the transcribe plugin\'s address; /api reset — the default' });
+          break;
+        }
+        TRANSCRIBE_BASE = arg.replace(/\/+$/, '');
+        localStorage.setItem('irc_transcribe', TRANSCRIBE_BASE);
+        connectTranscripts();
+      }
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Recorder: ${rec.httpBase} (${rec.connected ? 'connected' : 'not connected'}${rec.version ? ', ' + rec.version : ''})` });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Transcripts: ${TRANSCRIBE_BASE} (${transcriptState})${TRANSCRIBE_BASE === TRANSCRIBE_DEFAULT ? ' — the default' : ''}` });
+      if (!arg) addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'Set it with /api http://host:port, or ?transcribe= in the URL; /api reset for the default' });
       break;
+    }
 
     case '/stats': {
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '— Stats —' });
@@ -4295,9 +4175,21 @@ function handleCommand(cmd) {
       }
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `  Unique users: ${uniqueNicks.size}` });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `  Total affiliations: ${totalU}` });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `  Active calls: ${activeCalls.size}` });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `  Active calls: ${liveCalls.size}` });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `  Connection: ${connectionState}` });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '— End of /stats —' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `  Transcripts: ${transcriptState}` });
+      // The recorder's radio registry: what it has heard of each system
+      const statsChan = activeChannel;
+      queryRadio({ what: 'summary' })
+        .then(res => {
+          if (res.error) throw new Error(res.error);
+          for (const [sys, s] of Object.entries(res.systems || {})) {
+            const name = systemNames.get(sys) || sys;
+            addMsg(statsChan, { ts: ts(), kind: 'notice', text: `  ${name}: ${s.talkgroups} talkgroups heard (${s.tgs24h} in 24 h), ${s.units} radios (${s.units1h} in the last hour, ${s.units24h} in 24 h, ${s.newUnits24h} new)` });
+          }
+        })
+        .catch(err => addMsg(statsChan, { ts: ts(), kind: 'notice', text: `  Radio registry: ${err.message}` }))
+        .finally(() => addMsg(statsChan, { ts: ts(), kind: 'notice', text: '— End of /stats —' }));
       break;
     }
 
@@ -4317,15 +4209,15 @@ function handleCommand(cmd) {
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /who, /names        — List users in channel' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /whois <nick>       — User info' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /topic              — Show channel topic' });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /stats              — Connection & channel stats' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /stats              — Connection, channel and radio stats' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /fav                — Toggle favorite on current channel' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /scan               — Toggle scanner on current channel' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /scanner            — Toggle scanner mode on/off' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /ops [patterns]     — View/set op nick patterns (comma-sep regex)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /readall            — Mark all channels as read' });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /reconnect          — Reconnect SSE stream' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /reconnect          — Reconnect the transcript stream' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /clear              — Clear scrollback' });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /api                — Show API base URL' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /api [url|reset]    — Show or set the transcribe plugin\'s address' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /nerd               — Toggle hipster nerd cool mode (small text, low contrast)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '— End of /help —' });
       break;
@@ -4503,10 +4395,8 @@ function playCall(callId, nick, channel, msgEl, txPos, txDuration) {
   // Clear old segments
   playerProgress.querySelectorAll('.player-segment, .player-segment-divider').forEach(el => el.remove());
 
-  // Load audio — append token for <audio> element (bypasses patched fetch)
-  const audioUrl = `${API_BASE}/calls/${callId}/audio`;
-  const authToken = window.trAuth && window.trAuth.getToken();
-  audioEl.src = authToken ? audioUrl + '?token=' + encodeURIComponent(authToken) : audioUrl;
+  // Load audio — the recorded call's file from the recorder (callId is its path), each segment URL-encoded
+  audioEl.src = `/calls/${String(callId).split('/').map(encodeURIComponent).join('/')}.wav`;
   audioEl.load();
 
   // Seek to transmission start once metadata loaded
@@ -4759,11 +4649,13 @@ async function init() {
   switchChannel(STATUS_CHANNEL);
   renderTree();
 
-  serverMsg(`tr-engine IRC client — Layer 1 (read-only)`);
-  serverMsg(`API: ${API_BASE}`);
+  serverMsg(`Radio IRC — a Trunk Recorder Pro interface (read-only)`);
+  serverMsg(`Recorder: ${rec.httpBase}`);
+  serverMsg(`Transcripts: ${TRANSCRIBE_BASE}`);
   serverMsg('');
+  setConnectionState('connecting');
 
-  // Bootstrap: channels → unit nicks → affiliations → recent calls → SSE
+  // Bootstrap at the recorder's hello: channels → recent calls → radios and affiliations; then transcripts
   initResizablePanels();
   window.addEventListener('resize', () => {
     if (isMobileLayout()) return;
@@ -4772,18 +4664,53 @@ async function init() {
     applyPanelWidth('--channel-tree-width', Math.max(180, Math.min(left, Math.floor(window.innerWidth * 0.5))));
     applyPanelWidth('--nicklist-width', Math.max(140, Math.min(right, Math.floor(window.innerWidth * 0.4))));
   });
-  await bootstrapChannels();
-  await bootstrapUnitNicks();
-  await bootstrapAffiliations();
-  await bootstrapRecentCalls();
-
-  // Connect SSE for live events
-  connectSSE();
-
   // Status bar ticker
   setInterval(updateStatusBar, 1000);
   updateStatusBar();
 }
+
+// ── The recorder's messages ──
+let droppedAt = 0;
+
+rec.on('connection', (up) => {
+  setConnectionState(up ? 'connected' : 'disconnected');
+  if (!up) {
+    droppedAt = Date.now();
+    serverMsg('Connection to the recorder lost, reconnecting...');
+  }
+});
+
+rec.on('hello', (m) => {
+  syncedSinceHello = false;
+  statusServer.textContent = `trunk-pro ${m.version || ''}`.trim();
+  if (!bootstrapped) {
+    serverMsg(`Connected to Trunk Recorder Pro ${m.version || ''}`.trim());
+    if (rec.phase.phase !== 'running') serverMsg(`The recorder is ${rec.phase.phase}${rec.phase.error ? ': ' + rec.phase.error : ''}`);
+    bootstrapChannels();
+    bootstrapRecentCalls();
+    bootstrapped = true;
+    bootstrapUnits();
+    connectTranscripts();
+  } else {
+    serverMsg('Reconnected to the recorder');
+    catchUpHistory(droppedAt - 60000);
+  }
+});
+
+rec.on('state', (m) => {
+  if (bootstrapped) serverMsg(`The recorder is ${m.phase}${m.error ? ': ' + m.error : ''}`);
+  syncCalls();
+});
+rec.on('status', syncCalls);
+rec.on('concluded', (m) => handleConcluded(m.entry));
+rec.on('monitorEvent', (m) => { if (bootstrapped && m.kind === 'unitAffiliated') handleAffiliation(m); });
+rec.on('callsResult', answerQuery);
+rec.on('radioResult', answerQuery);
+rec.on('stats', showDecodeRate);
+rec.on('config', () => { if (bootstrapped) loadSystemNames(); });
+rec.on('talkgroups', (m) => refreshTalkgroups(m.system));
+rec.on('talkgroupEdited', (m) => refreshTalkgroups(m.system));
+rec.on('error', (m) => serverMsg(`Recorder: ${m.message}`));
 
 init();
 inputField.focus();
@@ -4791,6 +4718,5 @@ inputField.focus();
 <div class="vignette-overlay"></div>
 <div class="theme-label" id="themeLabel"></div>
 <script src="theme-engine.js?v=2"></script>
-<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"ac1721b3b563478ba51e2a90be05801a","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
