@@ -1,0 +1,16 @@
+{
+  "id": "irc",
+  "name": "Radio IRC",
+  "version": "0.1.0",
+  "description": "Talkgroups as channels, calls as messages with their transcripts, affiliated radios as the nicklist.",
+  "api": 1,
+  "access": "listen",
+  "license": "MIT",
+  "repository": "https://github.com/trunk-reporter/trp-interface-irc",
+  "screenshots": [
+    {
+      "path": "screenshots/irc.png",
+      "caption": "A channel with transcribed calls and its nicklist"
+    }
+  ]
+}

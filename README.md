@@ -1,0 +1,58 @@
+# Radio IRC
+
+A [Trunk Recorder Pro](https://trunkrecorder.pro) interface: your radio system as an IRC client.
+Every talkgroup is a channel, every call a message whose text is its transcript, and the radios
+affiliated with a talkgroup are the channel's nicklist. It is a port of tr-engine's IRC page, with
+the same look, layout, commands and themes, fed by the recorder's own API and the transcribe
+plugin.
+
+![A channel with transcribed calls and its nicklist](screenshots/irc.png)
+
+## What it shows
+
+- **Channel tree** (left): each system's talkgroups as channels, in folders by the talkgroup
+  file's category (under the system's name when there are several systems). A talkgroup heard
+  but not in the file gets a channel named by its number. Channels with activity show; the rest
+  fold into "N more...". Search, unread counts, **Read All**, a star for favourites (they gather
+  in the **Starred** channel) and a scan toggle.
+- **Messages**: a recorded call is a line per keyup, the radio named; when its transcript comes
+  the text replaces the placeholder, one line per segment. A call skipped or failed by the
+  transcriber shows the reason, muted. A call on the air shows as the radio "typing". Scroll up
+  for older calls (the recorder's call store). ▶ plays a finished call's audio.
+- **Nicklist** (right): the radios affiliated with the talkgroup, as the recorder's radio
+  registry has them, and those that talked; a radio that affiliates elsewhere parts and joins
+  live. Click a nick for the radio's transmissions and affiliations.
+- **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,
+  `/scanner`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
+- The theme picker at the top switches between the themes.
+
+Renaming a channel (✎) or a radio (its card's Save) is kept **in this browser only**: the
+interface has listen access and can't change the recorder's talkgroup file or unit names.
+Favourites, scan list, panel widths and theme are kept in the browser too.
+
+## Serving it
+
+On the recorder's **Interfaces** page, **Add a folder…** and pick this folder (or
+`trunk-pro interface add <folder>`). For one run, `trunk-pro --ui <folder>`. It is served on a
+port of its own with the recorder's API beside it, and needs listen access only: it changes
+nothing. It loads nothing from the internet; the themes name their fonts and fall back to the
+computer's own.
+
+## Transcripts
+
+They come from the **transcribe plugin**'s HTTP API, at `http://127.0.0.1:8767` unless you say
+otherwise: `?transcribe=http://host:port` in the address, or `/api http://host:port` in the
+page (remembered; `/api reset` for the default). In the plugin's settings:
+
+- `http.port` must be set (e.g. `8767`);
+- `http.origins` must list this interface's origin, exactly as the browser shows it, e.g.
+  `http://127.0.0.1:8084` and `http://localhost:8084` (the port is the one the recorder gave the
+  interface). Without it the browser refuses the transcripts.
+
+Both take effect when recording next starts. Without the plugin the page works, with no text.
+
+Made for Trunk Recorder Pro 0.2.11 (interface API 1).
+
+## License
+
+MIT.
