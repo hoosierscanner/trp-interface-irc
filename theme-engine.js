@@ -150,7 +150,7 @@
     const metaTitle = (document.querySelector('meta[name="card-title"]') || {}).content || '';
     const metaDesc  = (document.querySelector('meta[name="card-description"]') || {}).content || '';
     const pageTitle    = opts.pageTitle    || metaTitle    || 'Event Horizon';
-    const pageSubtitle = opts.pageSubtitle || metaDesc     || 'tr-engine';
+    const pageSubtitle = opts.pageSubtitle || metaDesc     || 'Trunk Recorder Pro';
     const homeHref     = opts.homeHref     || 'index.html';
 
     // Inject CSS
@@ -439,17 +439,10 @@
   function loadNavPages() {
     if (_navPages) { renderNavPages(); return; }
 
-    fetch('/api/v1/pages')
-      .then(r => r.json())
-      .then(pages => { _navPages = pages; renderNavPages(); })
-      .catch(() => {
-        const dropdown = document.getElementById('eh-nav-dropdown');
-        dropdown.textContent = '';
-        const ph = document.createElement('div');
-        ph.className = 'eh-nav-placeholder';
-        ph.textContent = 'could not load pages';
-        dropdown.appendChild(ph);
-      });
+    // tr-engine listed its other pages from /api/v1/pages. A Trunk Recorder Pro
+    // interface is one page on a port of its own, so there is nothing to list.
+    _navPages = [];
+    renderNavPages();
   }
 
   function renderNavPages() {
@@ -668,28 +661,7 @@
     applyTheme(initialTheme);
   }
 
-  // ── Update badge ──
-  function checkForUpdate() {
-    fetch('/api/v1/health')
-      .then(r => r.json())
-      .then(d => {
-        if (!d.update_available) return;
-        const right = document.querySelector('.eh-header-right');
-        if (!right || right.querySelector('.eh-update-badge')) return;
-        const badge = document.createElement('a');
-        badge.className = 'eh-update-badge';
-        badge.href = d.release_url || '#';
-        badge.target = '_blank';
-        badge.rel = 'noopener';
-        badge.textContent = 'Update: ' + (d.latest_version || 'new');
-        right.insertBefore(badge, right.firstChild);
-      })
-      .catch(() => {});
-  }
-  if (opts.header !== false) {
-    // Check after a short delay to avoid blocking page load
-    setTimeout(checkForUpdate, 2000);
-  }
+  // (tr-engine's update badge, from /api/v1/health, is not carried: the recorder has its own.)
 
   // ── Public API ──
   window.ThemeEngine = {
