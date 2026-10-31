@@ -23,12 +23,27 @@ plugin.
   registry has them, and those that talked; a radio that affiliates elsewhere parts and joins
   live. Click a nick for the radio's transmissions and affiliations.
 - **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,
-  `/scanner`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
+  `/scanner`, `/listen`, `/volume`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
 - The theme picker at the top switches between the themes.
 
 Renaming a channel (✎) or a radio (its card's Save) is kept **in this browser only**: the
 interface has listen access and can't change the recorder's talkgroup file or unit names.
 Favourites, scan list, panel widths and theme are kept in the browser too.
+
+## Listening live
+
+**LISTEN** in the title bar plays the calls as they happen, several at once, each talkgroup panned
+to its own spot left to right so two channels talking together stay apart. Beside it:
+
+- the **mode**: **channel** (the channel you're in), **starred** (every favourite, and the
+  channel you're in) or **scan** (the scan list, and the channel you're in);
+- the **volume** (0–100).
+
+While listening the button reads `LISTENING ♪ N`, N the calls being heard now, and those
+channels get a speaker mark in the tree. The mode and the volume are remembered; listening
+itself starts only on a click (or a typed `/listen`), never on reload. The same from the input:
+`/listen` (on/off), `/listen channel|starred|scan`, `/listen off`, `/volume N`. While it is on,
+the scanner's auto-play is paused, so a call isn't heard twice; ▶ still plays a recording.
 
 ## Serving it
 
