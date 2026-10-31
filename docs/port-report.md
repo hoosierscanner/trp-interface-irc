@@ -115,3 +115,76 @@ The screenshot (`screenshots/irc.png`, 1280 × 800) was taken with headless Edge
 - The screenshot shows live talkgroup and radio names (public RadioReference data).
 - The `repository` (github.com/trunk-reporter/trp-interface-irc) does not exist yet; nothing was
   pushed.
+
+## Round 2: live listening
+
+### What changed
+
+- **Title bar:** a LISTEN button (inline SVG headphones; `LISTENING ♪ N` while on, N the
+  players whose `nowPlaying` is set), a mode `<select>` (channel / starred / scan) and a volume
+  slider 0–100 (default 80; gain = 2.5 × v / 100, OmniTrunker's mapping). Mode and volume in
+  `localStorage` (`irc_listen_mode`, `irc_volume`); listening is never resumed on reload.
+- **Audio:** OmniTrunker's pattern. The click (or a typed `/listen`) makes one `AudioContext`;
+  `rec.listen()` (no filter); on each `audio` chunk whose `short:tg` is in the wanted set, the
+  call's `LivePlayer` (`followCall: false`, `gain`, `pan: panFor(tg)`, `context: sharedCtx`) is
+  made on its first chunk and `resume()`d once. A player goes when its call leaves `rec.calls`
+  (`syncCalls` → `liveCallEnded`), when its talkgroup leaves the wanted set
+  (`dropUnwantedPlayers`), or after 5 s with `nowPlaying` null. Off: `rec.listen(false)`, every
+  player stopped, the context closed.
+- **Wanted set** (`computeWanted`): the channel you're in (not `*status` or Starred), plus the
+  favourites (starred) or the scan list (scan); recomputed on a channel switch, a favourite or
+  scan toggle and a mode change.
+- **Commands:** `/listen`, `/listen channel|starred|scan` (starts listening if off),
+  `/listen off`, `/volume N` (`/vol`); in `/help`.
+- **Scanner:** `scannerEnqueue` returns at once while listening; `/scan`, `/scanner`, `/help`
+  and the "Listening live" notice say so. ▶ still plays (its own `audioEl`).
+- **Tree:** rows whose talkgroup a player is playing get `audible` (a 🔊 after the name, the
+  row in `--irc-success`); a 250 ms tick re-renders the tree only when that set changes.
+- **`window._ircAudio`:** `listening()`, `mode()`, `wanted()`, `debug()` →
+  `{ contextState, mode, volume, gain, audible, players: [{ callId, system, talkgroup, pan,
+  gain, nowPlaying, sharedContext, onAir }] }`; after stopping, `contextState` is the closed
+  context's (`"closed"`).
+- At phone width the decode rate is hidden in the title bar to leave room for the control.
+- `interface.json` 0.2.0; README "Listening live".
+
+### How it was tested
+
+Claude in Chrome at `http://127.0.0.1:8084/`, against the running recorder (`marcs`, busy), state
+read with `_ircAudio.debug()` every 250–500 ms:
+
+- **channel**, `#09-9-ALPHA` (TG 9139), started by a real click: wanted `["marcs:9139"]`; call
+  16768 got a player (pan −0.48, shared context `running`, `♪ 1`, the row marked); no player for
+  any other talkgroup in ~90 samples; it went at 44.6 s when its call left the air, and the next
+  call (16774) got its own.
+- **starred** (by typing `/listen starred`; 9139 and 55599 starred): both talkgroups had players
+  at once 44 s in: 16857 on TG 55599 at pan −0.690 and 16875 on TG 9139 at pan −0.485, both on
+  the shared context, `LISTENING ♪ 2`. Six players went as their calls left the air (each still
+  on the air 250 ms before). The slider 80 → 40 took both players' gain from 2 to 1 at once
+  (`irc_volume` = 40); `/volume 65` gave 1.625.
+- **scan** (09-9-TANGO, TG 9170, and 31-MAIN-DISP scanned): wanted `["marcs:9170","marcs:55599"]`
+  and 4 players in 38 s, all on 9170. Switching to **channel** in `#31-MAIN-DISP` dropped the
+  TANGO player at once and kept the 55599 one. A favourite toggle recomputed the set.
+- **Scanner:** scanner on and both channels scanned, listening: 3 recordings came in 38 s in
+  TANGO, and 1 more in a later 38 s; nothing auto-played (player bar unchanged, no channel
+  switch). Before the LISTEN click, after a reload, it did play one (as it should).
+- **▶ while listening:** a recording played (0:01 → 0:03 of 0:05); the context stayed `running`.
+- **Off:** `/listen off`, and the button with one player live: 0 players, context `closed`,
+  `LISTEN`, no rows marked, "Live listening off".
+- **Reload:** not listening; mode and volume restored.
+- Rows marked seen: 09-9-ALPHA, 31-MAIN-DISP, 09-9-TANGO (a starred channel's row twice: the
+  Favourites section and its folder).
+- Console: no errors. Requests: `127.0.0.1:8084` and `127.0.0.1:8767` only.
+- The browser's `localStorage` was put back afterwards (scan list, scanner, mode, volume).
+
+Not tested: hearing it (the checks read the players' state, not the speakers); phone width;
+a reconnect while listening; several systems.
+
+### Concerns
+
+- **Commit trailer:** the brief's exact `Co-Authored-By: Claude Fable 5.1` was used, as asked;
+  the work was done by Claude Opus 5.5.
+- **Bandwidth:** `rec.listen()` with no filter sends every call's audio on a busy system even when
+  one talkgroup is wanted (the guide's advice for several). `listen({ system, talkgroup })` when
+  the set has one talkgroup would save it; not done, as the brief decided.
+- **Pans** come from a hash: two talkgroups can land close (the two above were both left,
+  −0.69 and −0.48).
