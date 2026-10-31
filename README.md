@@ -24,7 +24,7 @@ plugin.
   live. Click a nick for the radio's transmissions and affiliations.
 - **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,
   `/scanner`, `/listen`, `/volume`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
-- The theme picker at the top switches between the themes.
+- The theme picker at the top switches between the themes (Ctrl+Shift+T cycles them; `?theme=matrix` in the address picks one, kept like a pick). Your own themes go in a `theme-local.js` beside `index.html`, which an upgrade never touches; [theme-local.example.js](https://github.com/trunk-reporter/trp-themes/blob/main/theme-local.example.js) is one to copy. The themes are [trp-themes](https://github.com/trunk-reporter/trp-themes) 1.0.0's, pared to the variables this page uses, with the default written into the page so it is styled before (or without) the engine; `node pare.mjs <this folder>` there refreshes them.
 
 Renaming a channel (✎) or a radio (its card's Save) is kept **in this browser only**: the
 interface has listen access and can't change the recorder's talkgroup file or unit names.

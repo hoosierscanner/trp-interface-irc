@@ -13,6 +13,32 @@
 </script>
 <script src="theme-config.js"></script>
 <style>
+/* trp-themes: the default theme (Apple Glass), by trp-themes 1.0.0's pare.mjs: the page's look before theme-engine.js
+   runs, or without it. Don't edit it here; run pare.mjs. */
+:root {
+  --bg: #f8f7f4;
+  --bg-surface: #ffffff;
+  --bg-elevated: rgba(0,0,0,0.02);
+  --border: rgba(255,255,255,0.88);
+  --border-hover: rgba(37,99,235,0.2);
+  --text: #18181b;
+  --text-mid: #3f3f46;
+  --text-muted: #71717a;
+  --text-faint: #a1a1aa;
+  --accent: #2563eb;
+  --accent-light: #60a5fa;
+  --success: #84cc16;
+  --warning: #f97316;
+  --danger: #f43f5e;
+  --info: #06b6d4;
+  --lime: #84cc16;
+  --magenta: #d946ef;
+  --rose: #f43f5e;
+  --font-display: 'Outfit', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --shadow-panel: 0 1px 3px rgba(0,0,0,0.03), 0 8px 32px rgba(0,0,0,0.04);
+}
+/* /trp-themes */
 :root {
   --irc-accent: var(--accent);
   --irc-accent-light: var(--accent-light);
@@ -5050,6 +5076,6 @@ inputField.focus();
 </script>
 <div class="vignette-overlay"></div>
 <div class="theme-label" id="themeLabel"></div>
-<script src="theme-engine.js?v=2"></script>
+<script src="theme-engine.js"></script>
 </body>
 </html>
