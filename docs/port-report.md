@@ -188,3 +188,5 @@ a reconnect while listening; several systems.
   the set has one talkgroup would save it; not done, as the brief decided.
 - **Pans** come from a hash: two talkgroups can land close (the two above were both left,
   −0.69 and −0.48).
+
+**After the round (controller):** when exactly one talkgroup is wanted (channel mode, or a mode whose set has one entry), the page asks the recorder for that talkgroup alone (`listen({ system, talkgroup })`) instead of everything; with several, it still listens to everything and drops the rest. Checked against the recorder with a plain socket: a filtered listen on one talkgroup returned that talkgroup's frames only.

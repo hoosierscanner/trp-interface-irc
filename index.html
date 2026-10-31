@@ -4852,8 +4852,20 @@ function computeWanted() {
 /** The channel, a favourite, the scan list or the mode changed: hear what is wanted now. */
 function liveWantedChanged() {
   wantedKeys = computeWanted();
+  if (liveListening) rec.listen(listenFilter());
   dropUnwantedPlayers();
   updateListenUI();
+}
+
+/**
+ * What to ask the recorder for: one talkgroup wanted, just its audio (the recorder filters by
+ * system and talkgroup); more than one, everything, and the chunks not wanted are dropped.
+ */
+function listenFilter() {
+  if (wantedKeys.size !== 1) return {};
+  const key = wantedKeys.values().next().value;
+  const i = key.lastIndexOf(':');
+  return { system: key.slice(0, i), talkgroup: Number(key.slice(i + 1)) };
 }
 
 function dropPlayer(callId) {
@@ -4907,7 +4919,7 @@ async function startListening() {
   if (!sharedCtx) return false; // stopped while starting
   liveListening = true;
   wantedKeys = computeWanted();
-  rec.listen();
+  rec.listen(listenFilter());
   updateListenUI();
   renderTree();
   addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Listening live (${listenMode}): ${describeWanted()}. The scanner's auto-play is paused meanwhile.` });
