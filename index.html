@@ -87,6 +87,42 @@ body::after {
 .titlebar .topic { color: var(--text-muted); margin-left: 8px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .titlebar .lag { color: var(--warning); margin-left: auto; }
 
+/* ── Live listening (title bar) ── */
+.listen-ctl { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.listen-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 0 6px;
+  height: 20px;
+  cursor: pointer;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.listen-btn:hover { color: var(--text); }
+.listen-btn.active { color: var(--irc-success); border-color: var(--irc-success); }
+.listen-count:empty { display: none; }
+.listen-mode {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-mid);
+  font-family: inherit;
+  font-size: 12px;
+  height: 20px;
+  border-radius: 3px;
+}
+.listen-vol { width: 70px; accent-color: var(--irc-accent); }
+.channel-item.audible .chan-label::after {
+  content: ' \1F50A';
+  font-size: 10px;
+  color: var(--irc-success);
+}
+.channel-item.audible { color: var(--irc-success); }
+
 /* ── Main layout ── */
 .main { display: flex; flex: 1; overflow: hidden; }
 
@@ -847,6 +883,8 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
     justify-content: space-between;
   }
   .titlebar .topic { display: none; }
+  .listen-vol { width: 48px; }
+  .titlebar .lag { display: none; }
 
   /* Hamburger button */
   .mobile-hamburger {
@@ -1005,6 +1043,15 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   <span class="topic" id="titlebar-topic">Connecting...</span>
   <button class="mobile-hamburger mobile-users-btn" id="mobile-users-btn" aria-label="Open users">👥</button>
   <span class="lag" id="titlebar-lag"></span>
+  <span class="listen-ctl" id="listen-ctl">
+    <button class="listen-btn" id="listen-btn" title="Listen live: hear the calls as they happen (the mode picks which channels)"><svg class="listen-glyph" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 10V8a6 6 0 0 1 12 0v2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="1.5" y="9" width="3" height="5" rx="1" fill="currentColor"/><rect x="11.5" y="9" width="3" height="5" rx="1" fill="currentColor"/></svg><span id="listen-label">LISTEN</span><span class="listen-count" id="listen-count"></span></button>
+    <select class="listen-mode" id="listen-mode" title="What to hear live">
+      <option value="channel">channel</option>
+      <option value="starred">starred</option>
+      <option value="scan">scan</option>
+    </select>
+    <input type="range" class="listen-vol" id="listen-vol" min="0" max="100" value="80" title="Live volume">
+  </span>
 </div>
 
 <div class="main">
@@ -1106,7 +1153,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 
 <script type="module">
 // The recorder's own client library, served by the recorder on this port.
-import { TrunkClient, systemName } from "/api/client.js";
+import { TrunkClient, LivePlayer, systemName } from "/api/client.js";
 
 // ══════════════════════════════════════════════════════════════
 // TODO — Enhancement ideas
@@ -1302,6 +1349,7 @@ function toggleFavorite(chanName) {
   saveFavorites();
   updateStarredChannel();
   renderTree();
+  liveWantedChanged();
 }
 
 // ── Starred meta-channel management ──
@@ -1382,6 +1430,7 @@ function toggleScan(chanName) {
   else scanChannels.add(key);
   saveScanChannels();
   renderTree();
+  liveWantedChanged();
 }
 
 // Scanner audio queue
@@ -1391,6 +1440,8 @@ let scannerPlaying = false;
 
 function scannerEnqueue(callId, nick, chanName, emergency) {
   if (!scannerEnabled) return;
+  // Live listening is on: the call was heard as it happened; don't play it again.
+  if (liveListening) return;
   if (!isScanned(chanName)) return;
 
   // Emergency calls go to front of queue (after currently playing)
@@ -2313,7 +2364,7 @@ function groupLabelHtml(name) {
 function createChannelItem(ch) {
   const el = document.createElement('div');
   const unread = channelUnread.get(ch) || 0;
-  el.className = 'channel-item' + (ch === activeChannel ? ' active' : '') + (unread > 0 && ch !== activeChannel ? ' has-activity' : '');
+  el.className = 'channel-item' + (ch === activeChannel ? ' active' : '') + (unread > 0 && ch !== activeChannel ? ' has-activity' : '') + (isAudible(ch) ? ' audible' : '');
 
   const isStarred = ch === STARRED_CHANNEL;
 
@@ -2787,6 +2838,7 @@ function switchChannel(ch) {
 
   renderTree();
   renderNicklist();
+  liveWantedChanged();
 
   // Close mobile drawer on channel switch
   if (window.innerWidth <= 768) closeDrawers();
@@ -3717,6 +3769,7 @@ function syncCalls() {
   for (const [key, lc] of liveCalls) {
     if (present.has(key)) continue;
     liveCalls.delete(key);
+    liveCallEnded(lc.id);
     endLiveCall(lc);
   }
 
@@ -4084,9 +4137,10 @@ function handleCommand(cmd) {
       }
       toggleScan(activeChannel);
       addMsg(activeChannel, { ts: ts(), kind: 'notice',
-        text: isScanned(activeChannel)
+        text: (isScanned(activeChannel)
           ? `Added ${activeChannel} to scan list`
-          : `Removed ${activeChannel} from scan list` });
+          : `Removed ${activeChannel} from scan list`)
+          + (liveListening ? " (the scanner's auto-play is paused while live listening is on)" : '') });
       break;
     }
     case '/scanner': {
@@ -4094,7 +4148,37 @@ function handleCommand(cmd) {
       localStorage.setItem('irc_scanner_enabled', scannerEnabled ? '1' : '0');
       updateScannerUI();
       addMsg(activeChannel, { ts: ts(), kind: 'notice',
-        text: `Scanner ${scannerEnabled ? 'enabled' : 'disabled'}` });
+        text: `Scanner ${scannerEnabled ? 'enabled' : 'disabled'}`
+          + (scannerEnabled && liveListening ? ' (its auto-play is paused while live listening is on)' : '') });
+      break;
+    }
+
+    case '/listen': {
+      const arg = (parts[1] || '').toLowerCase();
+      if ((!arg && liveListening) || arg === 'off' || arg === 'stop') {
+        const wasOn = liveListening;
+        stopListening();
+        addMsg(activeChannel, { ts: ts(), kind: 'notice', text: wasOn ? 'Live listening off' : 'Live listening is not on' });
+      } else if (!arg) {
+        startListening();
+      } else if (LISTEN_MODES.includes(arg)) {
+        setListenMode(arg);
+        if (!liveListening) startListening();
+        else addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Listening live (${listenMode}): ${describeWanted()}` });
+      } else {
+        addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'Usage: /listen [channel|starred|scan|off]' });
+      }
+      break;
+    }
+
+    case '/volume':
+    case '/vol': {
+      if (parts[1] == null || !/^\d+$/.test(parts[1])) {
+        addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Volume: ${listenVolume} (usage: /volume 0-100)` });
+        break;
+      }
+      setLiveVolume(parts[1]);
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Volume: ${listenVolume}` });
       break;
     }
 
@@ -4212,7 +4296,11 @@ function handleCommand(cmd) {
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /stats              — Connection, channel and radio stats' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /fav                — Toggle favorite on current channel' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /scan               — Toggle scanner on current channel' });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /scanner            — Toggle scanner mode on/off' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /scanner            — Toggle scanner mode on/off (auto-play paused while listening live)' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /listen             — Toggle live listening (the LISTEN button)' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /listen channel|starred|scan — Hear this channel / it and the favourites / it and the scan list' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /listen off         — Stop live listening' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /volume N           — Live volume, 0-100' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /ops [patterns]     — View/set op nick patterns (comma-sep regex)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /readall            — Mark all channels as read' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /reconnect          — Reconnect the transcript stream' });
@@ -4696,6 +4784,231 @@ rec.on('hello', (m) => {
     catchUpHistory(droppedAt - 60000);
   }
 });
+
+
+// ══════════════════════════════════════════════════════════════
+// LIVE LISTENING
+// ══════════════════════════════════════════════════════════════
+// The recorder's live audio (rec.listen(): every call) and client.js's LivePlayer, as in
+// OmniTrunker: one AudioContext made on the LISTEN click (or a typed /listen), one LivePlayer per
+// call on the air mixed into it, each panned to its talkgroup's spot. Only the chunks of the
+// talkgroups the mode wants are played; the rest are dropped here.
+
+const listenBtn = document.getElementById('listen-btn');
+const listenLabel = document.getElementById('listen-label');
+const listenCount = document.getElementById('listen-count');
+const listenModeEl = document.getElementById('listen-mode');
+const listenVolEl = document.getElementById('listen-vol');
+
+const LISTEN_MODES = ['channel', 'starred', 'scan'];
+let listenMode = LISTEN_MODES.includes(localStorage.getItem('irc_listen_mode')) ? localStorage.getItem('irc_listen_mode') : 'channel';
+let listenVolume = (() => {
+  const v = parseInt(localStorage.getItem('irc_volume'), 10);
+  return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 80;
+})();
+// 80, the default, is the player's own gain of 2 (OmniTrunker's mapping).
+let liveGain = 2.5 * listenVolume / 100;
+let liveListening = false;
+let listenStarting = false; // between the click and the context running
+let sharedCtx = null;
+let closedCtx = null; // the last one closed by stopListening, for debug()
+// callId (as text) → { player, sys, tgid, key ("short:tg"), quietSince (ms, 0 while playing) }
+const livePlayers = new Map();
+// The "short:tg" keys the mode wants now; the ones being heard now (a player's nowPlaying set).
+let wantedKeys = new Set();
+let audibleKeys = new Set();
+// A player whose call has been quiet this long (past its own quietS) is dropped.
+const PLAYER_IDLE_MS = 5000;
+
+/** Each talkgroup at its own spot, -0.8 … 0.8 (tr-engine's audio-engine.js, as OmniTrunker). */
+function panFor(tgid) {
+  const h = ((Number(tgid) * 2654435761) >>> 0) % 10000;
+  return -0.8 + (h / 10000) * 1.6;
+}
+
+function channelKey(chanName) {
+  if (chanName === STATUS_CHANNEL || chanName === STARRED_CHANNEL) return null;
+  const ch = channels.get(chanName);
+  return ch && ch.tgid ? `${ch.system_id}:${ch.tgid}` : null;
+}
+
+/** Is this channel's talkgroup being heard right now (the tree's speaker mark)? */
+function isAudible(chanName) {
+  if (!liveListening || audibleKeys.size === 0) return false;
+  const key = channelKey(chanName);
+  return !!key && audibleKeys.has(key);
+}
+
+/** The talkgroups to hear: the channel you're in, plus the favourites or the scan list. */
+function computeWanted() {
+  const s = new Set();
+  const own = channelKey(activeChannel);
+  if (own) s.add(own);
+  if (listenMode === 'starred') for (const k of favorites) s.add(k);
+  if (listenMode === 'scan') for (const k of scanChannels) s.add(k);
+  return s;
+}
+
+/** The channel, a favourite, the scan list or the mode changed: hear what is wanted now. */
+function liveWantedChanged() {
+  wantedKeys = computeWanted();
+  dropUnwantedPlayers();
+  updateListenUI();
+}
+
+function dropPlayer(callId) {
+  const p = livePlayers.get(callId);
+  if (!p) return;
+  p.player.stop(); // with the shared context: just this player's nodes
+  livePlayers.delete(callId);
+}
+
+/** Players whose talkgroup fell out of the wanted set. */
+function dropUnwantedPlayers() {
+  for (const [id, p] of Array.from(livePlayers)) if (!wantedKeys.has(p.key)) dropPlayer(id);
+}
+
+/** A call left the air (syncCalls): its player goes with it. */
+function liveCallEnded(callId) {
+  dropPlayer(String(callId));
+}
+
+rec.on('audio', (chunk) => {
+  if (!liveListening || !sharedCtx) return;
+  const sys = systemName(rec.status, chunk.system);
+  const key = `${sys}:${chunk.talkgroup}`;
+  if (!wantedKeys.has(key)) return;
+  const id = String(chunk.callId);
+  let p = livePlayers.get(id);
+  if (!p) {
+    const player = new LivePlayer({ followCall: false, gain: liveGain, pan: panFor(chunk.talkgroup), context: sharedCtx });
+    p = { player, sys, tgid: chunk.talkgroup, key, quietSince: 0 };
+    livePlayers.set(id, p);
+    player.resume().catch(() => {});
+  }
+  p.player.play(chunk);
+});
+
+/** Start hearing live: from a click or a typed command (the gesture the AudioContext needs). */
+async function startListening() {
+  if (liveListening || listenStarting) return true;
+  listenStarting = true;
+  try {
+    sharedCtx = new AudioContext(); // made in the gesture, before any await
+    await sharedCtx.resume();
+  } catch (e) {
+    if (sharedCtx) sharedCtx.close().catch(() => {});
+    sharedCtx = null;
+    serverMsg(`Live listening could not start: ${e && e.message ? e.message : e}`);
+    return false;
+  } finally {
+    listenStarting = false;
+  }
+  if (!sharedCtx) return false; // stopped while starting
+  liveListening = true;
+  wantedKeys = computeWanted();
+  rec.listen();
+  updateListenUI();
+  renderTree();
+  addMsg(activeChannel, { ts: ts(), kind: 'notice', text: `Listening live (${listenMode}): ${describeWanted()}. The scanner's auto-play is paused meanwhile.` });
+  return true;
+}
+
+function stopListening() {
+  if (!liveListening && !sharedCtx) return;
+  rec.listen(false);
+  for (const id of Array.from(livePlayers.keys())) dropPlayer(id);
+  if (sharedCtx) sharedCtx.close().catch(() => {});
+  closedCtx = sharedCtx;
+  sharedCtx = null;
+  liveListening = false;
+  audibleKeys = new Set();
+  updateListenUI();
+  renderTree();
+}
+
+function setListenMode(mode) {
+  if (!LISTEN_MODES.includes(mode)) return;
+  listenMode = mode;
+  listenModeEl.value = mode;
+  localStorage.setItem('irc_listen_mode', mode);
+  liveWantedChanged();
+}
+
+function setLiveVolume(v) {
+  listenVolume = Math.max(0, Math.min(100, parseInt(v, 10) || 0));
+  liveGain = 2.5 * listenVolume / 100;
+  listenVolEl.value = listenVolume;
+  localStorage.setItem('irc_volume', String(listenVolume));
+  for (const p of livePlayers.values()) p.player.setGain(liveGain);
+}
+
+function describeWanted() {
+  const n = wantedKeys.size;
+  if (n === 0) return listenMode === 'channel' ? 'nothing until you join a channel' : `nothing (no ${listenMode === 'scan' ? 'scan list' : 'favourites'} and no channel joined)`;
+  return `${n} talkgroup${n === 1 ? '' : 's'}`;
+}
+
+function updateListenUI() {
+  listenBtn.classList.toggle('active', liveListening);
+  listenLabel.textContent = liveListening ? 'LISTENING' : 'LISTEN';
+  let playing = 0;
+  if (liveListening) for (const p of livePlayers.values()) if (p.player.nowPlaying) playing++;
+  const count = liveListening ? `♪ ${playing}` : '';
+  if (listenCount.textContent !== count) listenCount.textContent = count;
+  listenBtn.title = liveListening
+    ? `Listening live (${listenMode}): ${describeWanted()}, ${playing} playing. Click to stop.`
+    : 'Listen live: hear the calls as they happen (the mode picks which channels)';
+}
+
+listenBtn.addEventListener('click', () => { if (liveListening) stopListening(); else startListening(); });
+listenModeEl.value = listenMode;
+listenModeEl.addEventListener('change', () => setListenMode(listenModeEl.value));
+listenVolEl.value = listenVolume;
+listenVolEl.addEventListener('input', () => setLiveVolume(listenVolEl.value));
+updateListenUI();
+
+// Four times a second: quiet players go, the speaker marks and the ♪ count follow nowPlaying.
+setInterval(() => {
+  if (!liveListening) return;
+  const now = Date.now();
+  for (const [id, p] of Array.from(livePlayers)) {
+    if (p.player.nowPlaying) { p.quietSince = 0; continue; }
+    if (!p.quietSince) p.quietSince = now;
+    else if (now - p.quietSince > PLAYER_IDLE_MS) dropPlayer(id);
+  }
+  const heard = new Set();
+  for (const p of livePlayers.values()) if (p.player.nowPlaying) heard.add(p.key);
+  const changed = heard.size !== audibleKeys.size || [...heard].some(k => !audibleKeys.has(k));
+  audibleKeys = heard;
+  if (changed) renderTree();
+  updateListenUI();
+}, 250);
+
+// For checking in a console (the page's variables are inside this module).
+window._ircAudio = {
+  listening: () => liveListening,
+  mode: () => listenMode,
+  wanted: () => [...wantedKeys],
+  debug: () => ({
+    // While off: the state of the context last closed ("closed"), or null if never started.
+    contextState: sharedCtx ? sharedCtx.state : (closedCtx ? closedCtx.state : null),
+    mode: listenMode,
+    volume: listenVolume,
+    gain: liveGain,
+    audible: [...audibleKeys],
+    players: Array.from(livePlayers).map(([callId, p]) => ({
+      callId,
+      system: p.sys,
+      talkgroup: p.tgid,
+      pan: p.player.panValue,
+      gain: p.player.gainValue,
+      nowPlaying: p.player.nowPlaying,
+      sharedContext: !!sharedCtx && p.player._ctx === sharedCtx,
+      onAir: (rec.calls || []).some(c => String(c.id) === callId),
+    })),
+  }),
+};
 
 rec.on('state', (m) => {
   if (bootstrapped) serverMsg(`The recorder is ${m.phase}${m.error ? ': ' + m.error : ''}`);
