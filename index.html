@@ -4893,7 +4893,9 @@ rec.on('audio', (chunk) => {
   const id = String(chunk.callId);
   let p = livePlayers.get(id);
   if (!p) {
-    const player = new LivePlayer({ followCall: false, gain: liveGain, pan: panFor(chunk.talkgroup), context: sharedCtx });
+    // Both client.js generations: v0.2.11's takes the AudioContext (`context`), the next takes a
+    // node to play into (`output`); each ignores the other's option.
+    const player = new LivePlayer({ followCall: false, gain: liveGain, pan: panFor(chunk.talkgroup), context: sharedCtx, output: sharedCtx.destination });
     p = { player, sys, tgid: chunk.talkgroup, key, quietSince: 0 };
     livePlayers.set(id, p);
     player.resume().catch(() => {});
@@ -4952,7 +4954,13 @@ function setLiveVolume(v) {
   liveGain = 2.5 * listenVolume / 100;
   listenVolEl.value = listenVolume;
   localStorage.setItem('irc_volume', String(listenVolume));
-  for (const p of livePlayers.values()) p.player.setGain(liveGain);
+  for (const p of livePlayers.values()) setPlayerGain(p.player, liveGain);
+}
+
+/** The volume, on either client.js: `setGain()` (v0.2.11) or the `gain` setter (after it). */
+function setPlayerGain(player, g) {
+  if (typeof player.setGain === 'function') player.setGain(g);
+  else player.gain = g;
 }
 
 function describeWanted() {

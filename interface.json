@@ -1,7 +1,7 @@
 {
   "id": "irc",
   "name": "Radio IRC",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Talkgroups as channels, calls as messages with their transcripts, affiliated radios as the nicklist.",
   "api": 1,
   "access": "listen",
