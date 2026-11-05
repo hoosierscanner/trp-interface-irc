@@ -285,6 +285,8 @@ body::after {
   cursor: pointer;
 }
 .tree-section-label .nb { white-space: nowrap; }
+.unread-label { display: flex; align-items: center; justify-content: space-between; color: var(--irc-warning); cursor: default; }
+.unread-label::before { content: none; }
 .tree-section-label:hover { color: var(--text-mid); }
 .tree-section-label::before { content: '▾ '; font-size: 10px; }
 .tree-section-label.collapsed::before { content: '▸ '; }
@@ -1194,6 +1196,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 <script type="module">
 // The recorder's own client library, served by the recorder on this port.
 import { TrunkClient, LivePlayer, systemName } from "/api/client.js";
+import { unreadList, stepUnread, tabTitle } from "./unread.js";
 
 // ══════════════════════════════════════════════════════════════
 // TODO — Enhancement ideas
@@ -1260,6 +1263,7 @@ function nickColor(nick) {
 // { chanName: { tgid, system_id, alpha_tag, description, tag, group, mode, users: Map<unit_id, {nick, prefix, role}>, messages: [] } }
 const channels = new Map();
 const channelUnread = new Map();
+const channelLastMsgTs = new Map();   // channel -> when its latest unread message came (orders the Unread section)
 
 // Reverse lookups
 // system_id is a system's short name (the recorder's), everywhere in the page.
@@ -2060,6 +2064,7 @@ function renameChannel(oldName, newName) {
   channels.set(newName, state);
   channelUnread.set(newName, channelUnread.get(oldName) || 0);
   channelUnread.delete(oldName);
+  if (channelLastMsgTs.has(oldName)) { channelLastMsgTs.set(newName, channelLastMsgTs.get(oldName)); channelLastMsgTs.delete(oldName); }
   if (channelHasActivity.has(oldName)) {
     channelHasActivity.delete(oldName);
     channelHasActivity.add(newName);
@@ -2195,6 +2200,7 @@ function addMsg(channel, msg, skipForward) {
     if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
   } else {
     channelUnread.set(channel, (channelUnread.get(channel) || 0) + 1);
+    channelLastMsgTs.set(channel, Date.now());
     renderTree();
   }
 
@@ -2490,7 +2496,23 @@ function renderTree() {
   treeFrame = requestAnimationFrame(() => { treeFrame = 0; renderTreeNow(); });
 }
 
+/** Channels with unread messages, newest first (the Starred meta-channel and status are left out: they repeat or add noise). */
+function unreadEntries() {
+  return unreadList(channelUnread, channelLastMsgTs).filter(e => e.name !== STARRED_CHANNEL && e.name !== STATUS_CHANNEL && channels.has(e.name));
+}
+
+function updateTabTitle() {
+  document.title = tabTitle(unreadEntries().reduce((n, e) => n + e.count, 0), 'Radio IRC');
+}
+
+/** Jump to the next (dir 1) or previous (dir -1) channel with unread messages. */
+function jumpUnread(dir) {
+  const next = stepUnread(unreadEntries().map(e => e.name), activeChannel, dir);
+  if (next) switchChannel(next);
+}
+
 function renderTreeNow() {
+  updateTabTitle();
   // Group channels by group field
   const groups = new Map();
   for (const [name, ch] of channels) {
@@ -2540,6 +2562,28 @@ function renderTreeNow() {
   statusItem.addEventListener('click', () => switchChannel(STATUS_CHANNEL));
   sysSection.appendChild(statusItem);
   treeScroll.appendChild(sysSection);
+
+  // Unread: only the channels with unread messages, newest first
+  const unreadNow = unreadEntries();
+  if (unreadNow.length > 0) {
+    const total = unreadNow.reduce((n, e) => n + e.count, 0);
+    const unSection = document.createElement('div');
+    unSection.className = 'tree-section unread-section';
+    const unLabel = document.createElement('div');
+    unLabel.className = 'tree-section-label unread-label';
+    const unText = document.createElement('span');
+    unText.textContent = `Unread \u00b7 ${total > 99 ? '99+' : total} in ${unreadNow.length}`;
+    unText.title = 'Alt+Down / Alt+Up: next / previous unread channel';
+    const unRead = document.createElement('button');
+    unRead.className = 'read-all-btn';
+    unRead.textContent = 'Read All';
+    unRead.addEventListener('click', markAllRead);
+    unLabel.appendChild(unText);
+    unLabel.appendChild(unRead);
+    unSection.appendChild(unLabel);
+    for (const e of unreadNow) unSection.appendChild(createChannelItem(e.name));
+    treeScroll.appendChild(unSection);
+  }
 
   // Favorites section (with starred meta-channel at top)
   const favChans = [...channels.keys()].filter(ch => ch !== STATUS_CHANNEL && ch !== STARRED_CHANNEL && isFavorite(ch));
@@ -3472,6 +3516,7 @@ function bootstrapRecentCalls() {
     // Don't set unread for the currently active channel
     if (chanName !== activeChannel) {
       channelUnread.set(chanName, count);
+      if (!channelLastMsgTs.has(chanName)) channelLastMsgTs.set(chanName, 0);
     }
   }
 
@@ -3990,6 +4035,11 @@ function handleAffiliation(evt) {
 // ══════════════════════════════════════════════════════════════
 
 document.addEventListener('keydown', (e) => {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    jumpUnread(e.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
   if (e.key === '/' && document.activeElement !== inputField) {
     e.preventDefault();
     inputField.focus();
