@@ -1326,8 +1326,8 @@ function setSync(on) {
   updateSyncUI();
 }
 function localRenameCount() { return Object.keys(nameOverrides.tg).length + Object.keys(nameOverrides.unit).length; }
-/** /sync [on|off|status|push|pull]; push and pull are filled in below (Task: push/pull). */
-function syncCommand(arg) {
+/** /sync [on|off|status|push|pull confirm] */
+function syncCommand(arg, parts2) {
   const say = (text) => addMsg(activeChannel, { ts: ts(), kind: 'notice', text });
   if (arg === 'on' || arg === 'off') {
     if (!hasControl) { say('Sync needs control access; this interface only has listen access, so renames stay in this browser.'); return; }
@@ -1339,7 +1339,68 @@ function syncCommand(arg) {
     say(`Sync: ${hasControl ? (syncPref() ? 'on' : 'off') : 'n/a (listen access)'} · ${localRenameCount()} rename(s) kept only in this browser · ${pendingRenames.size} pending`);
     return;
   }
+  if (arg === 'push') { syncPush(say); return; }
+  if (arg === 'pull') { syncPull(say, parts2 === 'confirm'); return; }
   say('Usage: /sync [on|off|status|push|pull]');
+}
+
+/** /sync push: write the renames kept only in this browser to the recorder; clear the ones that were saved. */
+async function syncPush(say) {
+  if (!hasControl) { say('Sync needs control access; nothing to push to.'); return; }
+  if (!rec.connected) { say('The recorder is not connected.'); return; }
+  const split = (key) => { const i = key.lastIndexOf(':'); return [key.slice(0, i), key.slice(i + 1)]; };
+  const tgs = Object.entries(nameOverrides.tg);
+  const bySys = new Map();
+  for (const [key, name] of Object.entries(nameOverrides.unit)) {
+    const [sys, unit] = split(key);
+    if (!bySys.has(sys)) bySys.set(sys, []);
+    bySys.get(sys).push({ key, unit: Number(unit), name });
+  }
+  if (!tgs.length && !bySys.size) { say('Nothing to push: no renames are kept only in this browser.'); return; }
+  for (const [key, name] of tgs) {
+    const [sys, tg] = split(key);
+    pendingRenames.add(`tg:${key}`);
+    rec.setTalkgroup(sys, Number(tg), { alphaTag: name });   // cleared when the recorder confirms (talkgroupEdited)
+  }
+  if (tgs.length) say(`Sent ${tgs.length} channel name(s); each clears here when the recorder confirms`);
+  for (const [sys, list] of bySys) {
+    const r = await writeUnitNames(sys, list.map(e => ({ unit: e.unit, name: e.name })));
+    if (r.ok) {
+      for (const e of list) { delete nameOverrides.unit[e.key]; pendingRenames.delete(`unit:${e.key}`); }
+      saveNameOverrides();
+      say(`Saved ${list.length} radio name(s) on ${systemNames.get(sys) || sys}`);
+    } else {
+      say(`Could not save radio names on ${systemNames.get(sys) || sys}: ${r.error} (kept here)`);
+    }
+  }
+}
+
+/** /sync pull confirm: throw away the renames kept in this browser; the recorder's names show again. */
+function syncPull(say, confirmed) {
+  const n = localRenameCount();
+  if (!n) { say('Nothing to discard: no renames are kept only in this browser.'); return; }
+  if (!confirmed) { say(`This discards ${n} rename(s) kept only in this browser. Type /sync pull confirm to do it.`); return; }
+  const tgKeys = Object.keys(nameOverrides.tg), unitKeys = Object.keys(nameOverrides.unit);
+  nameOverrides.tg = {}; nameOverrides.unit = {};
+  saveNameOverrides();
+  pendingRenames.clear();
+  for (const key of tgKeys) {
+    const chanName = tgidToChannel.get(key);
+    const state = chanName && channels.get(chanName);
+    if (state) applyChannelName(state, tgMeta(state.system_id, state.tgid).alphaTag || '');
+  }
+  for (const uk of unitKeys) {
+    const i = uk.lastIndexOf(':');
+    const sys = uk.slice(0, i), unit = Number(uk.slice(i + 1));
+    let oldNick = null;
+    for (const ch of channels.values()) { const u = ch.users.get(uk); if (u) { oldNick = u.nick; break; } }
+    unitNickCache.delete(uk);
+    const fresh = resolveNick(sys, unit, '', 'event');
+    if (oldNick) changeNick(uk, oldNick, fresh);
+  }
+  renderNicklist();
+  renderTree();
+  say(`Discarded ${n} rename(s); the recorder's names show again`);
 }
 
 // Connection state (sseConnection: the transcribe plugin's event stream)
@@ -4415,7 +4476,7 @@ function handleCommand(cmd) {
     }
 
     case '/sync':
-      syncCommand(parts[1]);
+      syncCommand(parts[1], parts[2]);
       break;
 
     case '/readall':
