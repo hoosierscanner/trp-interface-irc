@@ -4047,6 +4047,11 @@ function applyTranscript(t) {
 /** Apply a transcript to a call's messages in one channel. One line per segment, the radio named
  *  (a segment with no radio: the call's last talker, else "unknown"); the text alone when there
  *  are no segments; a skipped or failed one's reason, muted. Returns whether the call was there. */
+/** "A, B +2": the radios heard in a call, for a transcript that can't say who said what. */
+function talkersLabel(sid, units) {
+  const names = units.slice(0, 2).map(u => resolveNick(sid, u, ''));
+  return names.join(', ') + (units.length > 2 ? ` +${units.length - 2}` : '');
+}
 function applyTranscriptionToChannel(chanName, callId, t) {
   const ch = channels.get(chanName);
   if (!ch) return false;
@@ -4065,14 +4070,19 @@ function applyTranscriptionToChannel(chanName, callId, t) {
   const sid = base.systemId || t.system;
   const talkers = base.talkers || [];
   const lastTalker = talkers.length ? talkers[talkers.length - 1] : null;
+  const distinctTalkers = [...new Set(talkers)];
   const startMs = base.callStart || t.startMs || (base.date ? base.date.getTime() : Date.now());
   const segs = (t.segments || []).filter(s => s && s.text && s.text.trim());
 
   let lines;
   if (segs.length > 0) {
     lines = segs.map(s => {
-      const unit = s.unit != null ? s.unit : lastTalker;
-      const nick = unit != null ? resolveNick(sid, unit, '') : 'unknown';
+      // No radio on the segment (engines without word times give one segment for the whole call): with
+      // several talkers, don't pin the whole conversation on the last one; name them all.
+      const several = s.unit == null && distinctTalkers.length > 1;
+      const unit = s.unit != null ? s.unit : (several ? null : lastTalker);
+      const nick = several ? talkersLabel(sid, distinctTalkers)
+        : (unit != null ? resolveNick(sid, unit, '') : 'unknown');
       const date = new Date(startMs + (s.start || 0) * 1000);
       const len = Math.max(0, (s.end || 0) - (s.start || 0));
       return Object.assign({}, base, {
