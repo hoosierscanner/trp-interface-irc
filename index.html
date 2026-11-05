@@ -4235,9 +4235,29 @@ function syncCalls() {
   }
   syncedSinceHello = true;
 
-  // Give up on recordings that never came (a call too short to keep, say).
-  const cutoff = Date.now() - 60000;
-  if (awaitingPath.length) awaitingPath = awaitingPath.filter(lc => lc.endedMs > cutoff);
+  // Give up on recordings that never came: a call shorter than the recorder's minimum call is deleted,
+  // not saved, so its placeholder lines (no audio, ever) are taken back out.
+  const cutoff = Date.now() - 20000;
+  if (awaitingPath.length) {
+    const gone = awaitingPath.filter(lc => lc.endedMs <= cutoff);
+    if (gone.length) {
+      awaitingPath = awaitingPath.filter(lc => lc.endedMs > cutoff);
+      for (const lc of gone) dropUnsavedCall(lc);
+    }
+  }
+}
+
+/** Take out the placeholder lines of a live call that was never recorded (no path came for them). */
+function dropUnsavedCall(lc) {
+  for (const name of [lc.chanName, STARRED_CHANNEL]) {
+    const ch = channels.get(name);
+    if (!ch) continue;
+    ch.messages = ch.messages.filter((m) => {
+      if (m.callId !== lc.key || m.path) return true;
+      if (m._el) m._el.remove();
+      return false;
+    });
+  }
 }
 
 /** A call came on the air: the typing indicator, an emergency notice, an encrypted call's line. */
