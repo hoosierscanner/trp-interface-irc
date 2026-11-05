@@ -357,6 +357,8 @@ body::after {
   display: inline-block;
   line-height: 14px;
 }
+.channel-item.emergency-chan .chan-prefix, .channel-item.emergency-chan .chan-label { color: var(--danger); font-weight: 600; }
+.channel-item.emergency-chan.has-activity { background: color-mix(in srgb, var(--danger) 14%, transparent); }
 .ign-icon {
   cursor: pointer;
   opacity: 0;
@@ -1310,6 +1312,8 @@ const STATUS_CHANNEL = '*status';
 
 // Starred meta-channel: aggregates all favorited talkgroup activity
 const STARRED_CHANNEL = '\u2605 Starred';
+const EMERGENCY_CHANNEL = '\u26A0 Emergency';   // every emergency call, from any talkgroup, with its origin tagged
+function isMetaChannel(name) { return name === STATUS_CHANNEL || name === STARRED_CHANNEL || name === EMERGENCY_CHANNEL; }
 
 // The connection to the recorder serving this page (client.js reconnects by itself). The frequent
 // monitorEvent kinds (affiliations among them) come only to a connection that subscribes to the
@@ -1644,6 +1648,29 @@ function destroyStarredChannel() {
   channels.delete(STARRED_CHANNEL);
   channelUnread.delete(STARRED_CHANNEL);
   channelLoadedCallIds.delete(STARRED_CHANNEL);
+}
+
+// ── Emergency meta-channel ──
+// Made the first time an emergency call is seen; collects them all (live and recent history), origin tagged.
+function ensureEmergencyChannel() {
+  if (channels.has(EMERGENCY_CHANNEL)) return channels.get(EMERGENCY_CHANNEL);
+  const st = {
+    tgid: null, system_id: null, alpha_tag: EMERGENCY_CHANNEL,
+    description: 'Emergency calls from every talkgroup',
+    tag: '', group: 'Emergency', mode: '', users: new Map(), messages: [], historyExhausted: true,
+  };
+  channels.set(EMERGENCY_CHANNEL, st);
+  channelUnread.set(EMERGENCY_CHANNEL, 0);
+  return st;
+}
+
+/** Copy an emergency message into the Emergency channel (a locally ignored talkgroup's too; one the recorder ignores isn't recorded). */
+function forwardToEmergency(sourceChannel, msg) {
+  if (!msg.emergency || msg.kind === 'topic' || msg.kind === 'mode') return;
+  if (isMetaChannel(sourceChannel) || isIgnoredRecorder(sourceChannel)) return;
+  ensureEmergencyChannel();
+  const copy = Object.assign({}, msg, { originChannel: sourceChannel, _el: null });
+  addMsg(EMERGENCY_CHANNEL, copy, true);
 }
 
 /** Forward a message to the starred channel with an origin tag */
@@ -2477,7 +2504,13 @@ function addMsg(channel, msg, skipForward) {
   const state = channels.get(channel);
   if (!state) return;
   // Ignored talkgroups show nothing (notices still do)
-  if (msg.kind !== 'notice' && (isIgnored(channel) || (msg.originChannel && isIgnored(msg.originChannel)))) return;
+  if (msg.kind !== 'notice') {
+    const hidden = isIgnored(channel) || (channel !== EMERGENCY_CHANNEL && msg.originChannel && isIgnored(msg.originChannel));
+    if (hidden) {
+      if (channel !== EMERGENCY_CHANNEL && !skipForward) forwardToEmergency(channel, msg);   // an emergency still shows
+      return;
+    }
+  }
 
   state.messages.push(msg);
   if (state.messages.length > MAX_MESSAGES) {
@@ -2506,8 +2539,9 @@ function addMsg(channel, msg, skipForward) {
   eventRate.push(Date.now());
 
   // Forward to starred channel (unless this IS the starred channel or already forwarded)
-  if (!skipForward && channel !== STARRED_CHANNEL && channel !== STATUS_CHANNEL) {
+  if (!skipForward && !isMetaChannel(channel)) {
     forwardToStarred(channel, msg);
+    forwardToEmergency(channel, msg);
   }
 }
 
@@ -2737,16 +2771,18 @@ function createChannelItem(ch) {
   const unread = channelUnread.get(ch) || 0;
   el.className = 'channel-item' + (ch === activeChannel ? ' active' : '') + (unread > 0 && ch !== activeChannel ? ' has-activity' : '') + (isAudible(ch) ? ' audible' : '');
 
-  const isStarred = ch === STARRED_CHANNEL;
+  const isEmergency = ch === EMERGENCY_CHANNEL;
+  const isStarred = ch === STARRED_CHANNEL || isEmergency;   // meta channels: no per-channel icons
+  if (isEmergency) el.classList.add('emergency-chan');
 
   const prefix = document.createElement('span');
   prefix.className = 'chan-prefix';
-  prefix.textContent = isStarred ? '\u2605' : '#';
+  prefix.textContent = isEmergency ? '\u26A0' : (isStarred ? '\u2605' : '#');
   el.appendChild(prefix);
 
   const label = document.createElement('span');
   label.className = 'chan-label';
-  label.textContent = isStarred ? 'Starred' : ch.slice(1);
+  label.textContent = isEmergency ? 'Emergency' : (isStarred ? 'Starred' : ch.slice(1));
   el.appendChild(label);
 
   if (unread > 0 && ch !== activeChannel) {
@@ -2813,11 +2849,11 @@ function renderTree() {
 
 /** Channels with unread messages, newest first (the Starred meta-channel and status are left out: they repeat or add noise). */
 function unreadEntries() {
-  return unreadList(channelUnread, channelLastMsgTs).filter(e => e.name !== STARRED_CHANNEL && e.name !== STATUS_CHANNEL && channels.has(e.name) && !isIgnored(e.name));
+  return unreadList(channelUnread, channelLastMsgTs).filter(e => !isMetaChannel(e.name) && channels.has(e.name) && !isIgnored(e.name));
 }
 
 function updateTabTitle() {
-  document.title = tabTitle(unreadEntries().reduce((n, e) => n + e.count, 0), 'Radio IRC');
+  document.title = tabTitle(unreadEntries().reduce((n, e) => n + e.count, 0) + (channelUnread.get(EMERGENCY_CHANNEL) || 0), 'Radio IRC');
 }
 
 /** Jump to the next (dir 1) or previous (dir -1) channel with unread messages. */
@@ -2832,7 +2868,7 @@ function renderTreeNow() {
   // Group channels by group field
   const groups = new Map();
   for (const [name, ch] of channels) {
-    if (name === STATUS_CHANNEL || name === STARRED_CHANNEL || isIgnored(name)) continue;
+    if (isMetaChannel(name) || isIgnored(name)) continue;
     const g = ch.group || 'Ungrouped';
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(name);
@@ -2906,6 +2942,14 @@ function renderTreeNow() {
     treeScroll.appendChild(unSection);
   }
 
+  // Emergency: appears once an emergency call has been seen
+  if (channels.has(EMERGENCY_CHANNEL)) {
+    const emSection = document.createElement('div');
+    emSection.className = 'tree-section';
+    emSection.appendChild(createChannelItem(EMERGENCY_CHANNEL));
+    treeScroll.appendChild(emSection);
+  }
+
   // Favorites section (with starred meta-channel at top)
   const favChans = [...channels.keys()].filter(ch => ch !== STATUS_CHANNEL && ch !== STARRED_CHANNEL && isFavorite(ch) && !isIgnored(ch));
   if (favChans.length > 0 || channels.has(STARRED_CHANNEL)) {
@@ -2958,7 +3002,7 @@ function renderTreeNow() {
   }
 
   // Ignored: folded by default, so one can be brought back
-  const ignoredNow = [...channels.keys()].filter(ch => ch !== STATUS_CHANNEL && ch !== STARRED_CHANNEL && isIgnored(ch)).sort();
+  const ignoredNow = [...channels.keys()].filter(ch => !isMetaChannel(ch) && isIgnored(ch)).sort();
   if (ignoredNow.length > 0) {
     const igSection = document.createElement('div');
     igSection.className = 'tree-section';
@@ -3805,7 +3849,7 @@ function bootstrapChannels() {
   renderTree();
 
   // Auto-switch to first real channel
-  const firstChan = [...channels.keys()].find(k => k !== STATUS_CHANNEL && k !== STARRED_CHANNEL);
+  const firstChan = [...channels.keys()].find(k => !isMetaChannel(k));
   if (firstChan) switchChannel(firstChan);
 }
 
@@ -3915,6 +3959,22 @@ function bootstrapRecentCalls() {
       channelUnread.set(chanName, count);
       if (!channelLastMsgTs.has(chanName)) channelLastMsgTs.set(chanName, 0);
     }
+  }
+
+  // Recent emergency calls go in the Emergency channel too (oldest first)
+  const emMsgs = [];
+  for (const [chanName] of callsByChannel) {
+    if (isIgnoredRecorder(chanName)) continue;
+    for (const m of channels.get(chanName)?.messages || []) {
+      if (m.emergency && m.kind !== 'notice') emMsgs.push(Object.assign({}, m, { originChannel: chanName, _el: null }));
+    }
+  }
+  if (emMsgs.length) {
+    emMsgs.sort((a, b) => (a.date?.getTime() || 0) - (b.date?.getTime() || 0));
+    const em = ensureEmergencyChannel();
+    em.messages.push(...emMsgs);
+    channelHasActivity.add(EMERGENCY_CHANNEL);
+    if (activeChannel !== EMERGENCY_CHANNEL) { channelUnread.set(EMERGENCY_CHANNEL, emMsgs.length); channelLastMsgTs.set(EMERGENCY_CHANNEL, 0); }
   }
 
   serverMsg(`Loaded ${count} recent calls across ${backfillCounts.size} channels`);
@@ -4032,6 +4092,7 @@ function applyTranscript(t) {
   let applied = false;
   if (chanName && applyTranscriptionToChannel(chanName, t.path, t)) applied = true;
   if (channels.has(STARRED_CHANNEL) && applyTranscriptionToChannel(STARRED_CHANNEL, t.path, t)) applied = true;
+  if (channels.has(EMERGENCY_CHANNEL) && applyTranscriptionToChannel(EMERGENCY_CHANNEL, t.path, t)) applied = true;
   if (applied) {
     pendingTranscriptions.delete(t.path);
     return;
@@ -4249,7 +4310,7 @@ function syncCalls() {
 
 /** Take out the placeholder lines of a live call that was never recorded (no path came for them). */
 function dropUnsavedCall(lc) {
-  for (const name of [lc.chanName, STARRED_CHANNEL]) {
+  for (const name of [lc.chanName, STARRED_CHANNEL, EMERGENCY_CHANNEL]) {
     const ch = channels.get(name);
     if (!ch) continue;
     ch.messages = ch.messages.filter((m) => {
@@ -4396,6 +4457,11 @@ function upgradeLiveMessages(lc, entry) {
     if (oldStarred.length) {
       replaceCallMessages(STARRED_CHANNEL, oldStarred, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
     }
+  }
+  const em = channels.get(EMERGENCY_CHANNEL);
+  if (em && old.length) {
+    const oldEm = em.messages.filter(m => m.callId === lc.key);
+    if (oldEm.length) replaceCallMessages(EMERGENCY_CHANNEL, oldEm, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
   }
   drainPendingTranscriptions([call.call_id]);
   enqueueRecorded(call, chanName, newMsgs);
@@ -5314,7 +5380,7 @@ function panFor(tgid) {
 }
 
 function channelKey(chanName) {
-  if (chanName === STATUS_CHANNEL || chanName === STARRED_CHANNEL) return null;
+  if (isMetaChannel(chanName)) return null;
   const ch = channels.get(chanName);
   return ch && ch.tgid ? `${ch.system_id}:${ch.tgid}` : null;
 }

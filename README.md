@@ -21,6 +21,10 @@ plugin.
 - **Unread** (pinned above the groups, only when something is unread): the channels with unread
   messages, newest first, a count each; click one to jump to it; click the header to fold it (remembered). **Read All** is in its header;
   **Alt+↓ / Alt+↑** jump to the next / previous unread channel; the tab title carries the total.
+- **Emergency**: the first emergency call (the recorder's emergency flag) makes a red **Emergency** channel under
+  Unread, collecting every emergency call from any talkgroup, live and from the recorder's recent history,
+  with the talkgroup tagged on each line, transcripts and audio as usual. It shows an emergency even on a
+  talkgroup you've ignored here (not one the recorder ignores, which isn't recorded). Its unread count is in the tab title.
 - **Messages**: a recorded call is a line per keyup, the radio named; when its transcript comes
   the text replaces the placeholder, one line per segment. A call skipped or failed by the
   transcriber shows the reason, muted. A call on the air shows as the radio "typing". Scroll up
