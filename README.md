@@ -26,9 +26,7 @@ plugin.
   `/scanner`, `/listen`, `/volume`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
 - The theme picker at the top switches between the themes (Ctrl+Shift+T cycles them; `?theme=matrix` in the address picks one, kept like a pick). Your own themes go in a `theme-local.js` beside `index.html`, which an upgrade never touches; [theme-local.example.js](https://github.com/trunk-reporter/trp-themes/blob/main/theme-local.example.js) is one to copy. The themes are [trp-themes](https://github.com/trunk-reporter/trp-themes) 1.0.0's, pared to the variables this page uses, with the default written into the page so it is styled before (or without) the engine; `node pare.mjs <this folder>` there refreshes them.
 
-Renaming a channel (✎) or a radio (its card's Save) is kept **in this browser only**: the
-interface has listen access and can't change the recorder's talkgroup file or unit names.
-Favourites, scan list, panel widths and theme are kept in the browser too.
+Renaming a channel (✎) or a radio (its card's Save): see **Name sync** below. Favourites, scan list, panel widths and theme are kept in the browser too.
 
 ## Listening live
 
@@ -45,12 +43,27 @@ itself starts only on a click (or a typed `/listen`), never on reload. The same 
 `/listen` (on/off), `/listen channel|starred|scan`, `/listen off`, `/volume N`. While it is on,
 the scanner's auto-play is paused, so a call isn't heard twice; ▶ still plays a recording.
 
+## Name sync
+
+This interface asks for **control access**, so it can write names to the recorder and read them back:
+
+- **Channel rename (✎)** changes the talkgroup's name in the system's talkgroup file; **a radio's Save** edits
+  the system's unit names (`unitNames.csv`: one exact `unit,name` line, comments and other rows untouched).
+  Edits made elsewhere (another browser, the Talkgroup & UID Editor) appear here live, and the recorder's
+  name wins over one kept here.
+- The **SYNC** button in the title bar (or `/sync on|off`) turns writing on and off. Off, or with only listen
+  access, renames are kept in this browser, as before.
+- `/sync status` counts renames kept only here; `/sync push` writes them to the recorder and clears them
+  here; `/sync pull confirm` throws them away.
+- **Control access lets this page change the recorder's names and config.** Anyone who can reach this
+  interface's port (the recorder assigns it) can use it. Don't expose that port beyond people you trust.
+
 ## Serving it
 
 On the recorder's **Interfaces** page, **Add a folder…** and pick this folder (or
 `trunk-pro interface add <folder>`). For one run, `trunk-pro --ui <folder>`. It is served on a
-port of its own with the recorder's API beside it, and needs listen access only: it changes
-nothing. It loads nothing from the internet; the themes name their fonts and fall back to the
+port of its own with the recorder's API beside it, and asks for control access (for name
+sync; with only listen access it works read-only). It loads nothing from the internet; the themes name their fonts and fall back to the
 computer's own.
 
 ## Transcripts

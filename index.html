@@ -1083,6 +1083,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   <span class="topic" id="titlebar-topic">Connecting...</span>
   <button class="mobile-hamburger mobile-users-btn" id="mobile-users-btn" aria-label="Open users">👥</button>
   <span class="lag" id="titlebar-lag"></span>
+  <button class="listen-btn" id="sync-btn" disabled>SYNC n/a</button>
   <span class="listen-ctl" id="listen-ctl">
     <button class="listen-btn" id="listen-btn" title="Listen live: hear the calls as they happen (the mode picks which channels)"><svg class="listen-glyph" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M2 10V8a6 6 0 0 1 12 0v2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="1.5" y="9" width="3" height="5" rx="1" fill="currentColor"/><rect x="11.5" y="9" width="3" height="5" rx="1" fill="currentColor"/></svg><span id="listen-label">LISTEN</span><span class="listen-count" id="listen-count"></span></button>
     <select class="listen-mode" id="listen-mode" title="What to hear live">
@@ -1300,6 +1301,44 @@ const nameOverrides = (() => {
 })();
 function saveNameOverrides() {
   localStorage.setItem('irc-names', JSON.stringify(nameOverrides));
+}
+
+// ── Name sync with the recorder ──
+// With control access (the recorder sends `configPath` in `hello` only to control interfaces) a rename is
+// written to the recorder; the recorder's names win on the way back. Listen access: renames stay here.
+let hasControl = false;
+const pendingRenames = new Set();   // "tg:short:tgid" / "unit:short:unit": renamed here, not yet on the recorder
+function syncPref() { try { return localStorage.getItem('irc_sync') !== '0'; } catch { return true; } }
+function syncOn() { return hasControl && syncPref(); }
+function updateSyncUI() {
+  const b = document.getElementById('sync-btn');
+  if (!b) return;
+  b.textContent = hasControl ? (syncPref() ? 'SYNC' : 'SYNC off') : 'SYNC n/a';
+  b.classList.toggle('active', syncOn());
+  b.disabled = !hasControl;
+  b.title = hasControl
+    ? 'Renames are written to the recorder and read back from it. Click to turn off (keep renames in this browser).'
+    : 'No control access: renames stay in this browser (the interface needs control access to write names).';
+}
+function setSync(on) {
+  try { localStorage.setItem('irc_sync', on ? '1' : '0'); } catch { /* storage blocked */ }
+  updateSyncUI();
+}
+function localRenameCount() { return Object.keys(nameOverrides.tg).length + Object.keys(nameOverrides.unit).length; }
+/** /sync [on|off|status|push|pull]; push and pull are filled in below (Task: push/pull). */
+function syncCommand(arg) {
+  const say = (text) => addMsg(activeChannel, { ts: ts(), kind: 'notice', text });
+  if (arg === 'on' || arg === 'off') {
+    if (!hasControl) { say('Sync needs control access; this interface only has listen access, so renames stay in this browser.'); return; }
+    setSync(arg === 'on');
+    say(arg === 'on' ? 'Sync on: renames are written to the recorder' : 'Sync off: renames stay in this browser');
+    return;
+  }
+  if (arg === undefined || arg === 'status') {
+    say(`Sync: ${hasControl ? (syncPref() ? 'on' : 'off') : 'n/a (listen access)'} · ${localRenameCount()} rename(s) kept only in this browser · ${pendingRenames.size} pending`);
+    return;
+  }
+  say('Usage: /sync [on|off|status|push|pull]');
 }
 
 // Connection state (sseConnection: the transcribe plugin's event stream)
@@ -4247,6 +4286,10 @@ function handleCommand(cmd) {
       break;
     }
 
+    case '/sync':
+      syncCommand(parts[1]);
+      break;
+
     case '/readall':
       markAllRead();
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'All channels marked as read' });
@@ -4341,6 +4384,7 @@ function handleCommand(cmd) {
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /listen off         — Stop live listening' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /volume N           — Live volume, 0-100' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /ops [patterns]     — View/set op nick patterns (comma-sep regex)' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /sync [on|off|status|push|pull] — Name sync with the recorder (needs control access)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /readall            — Mark all channels as read' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /reconnect          — Reconnect the transcript stream' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /clear              — Clear scrollback' });
@@ -4672,6 +4716,8 @@ function markAllRead() {
 }
 
 document.getElementById('read-all-btn').addEventListener('click', markAllRead);
+document.getElementById('sync-btn').addEventListener('click', () => syncCommand(syncPref() ? 'off' : 'on'));
+updateSyncUI();
 
 // ── Nerd mode: restore from localStorage ──
 if (localStorage.getItem('nerd_mode') === '1') {
@@ -4809,6 +4855,8 @@ rec.on('connection', (up) => {
 
 rec.on('hello', (m) => {
   syncedSinceHello = false;
+  hasControl = Boolean(m.configPath);
+  updateSyncUI();
   statusServer.textContent = `trunk-pro ${m.version || ''}`.trim();
   if (!bootstrapped) {
     serverMsg(`Connected to Trunk Recorder Pro ${m.version || ''}`.trim());
