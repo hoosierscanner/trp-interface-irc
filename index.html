@@ -2809,45 +2809,70 @@ function cancelChannelEdit() {
   if (state && state.tgid) chanEditBtn.style.display = 'inline-block';
 }
 
+/** Give a talkgroup's channel the name `newTag` (the recorder's, or one typed here): renames the channel and refreshes the display. */
+function applyChannelName(state, newTag) {
+  const key = tgKey(state.system_id, state.tgid);
+  const oldChanName = tgidToChannel.get(key);
+  if (!oldChanName) return;
+  state.alpha_tag = newTag || String(state.tgid);
+
+  const newChanName = toChannelName(state.alpha_tag);
+  let finalName = newChanName;
+  if (channels.has(finalName) && channels.get(finalName) !== state) {
+    finalName = disambiguatedName(newChanName, state.system_id, state.tgid);
+  }
+  if (finalName !== oldChanName) renameChannel(oldChanName, finalName);
+
+  if (activeChannel === finalName) {
+    chanNameEl.textContent = finalName;
+    titlebarChan.textContent = state.tgid ? `${finalName} (TG ${state.tgid})` : finalName;
+  }
+  renderTree();
+}
+
 function saveChannelTag(newTag) {
   const state = channels.get(activeChannel);
   if (!state || !state.tgid || !newTag) return;
 
-  // Kept in this browser (listen access can't change the recorder's talkgroup file);
-  // the recorder's own name again drops the rename.
-  const renameKey = tgKey(state.system_id, state.tgid);
-  if (newTag === (tgMeta(state.system_id, state.tgid).alphaTag || '')) delete nameOverrides.tg[renameKey];
-  else nameOverrides.tg[renameKey] = newTag;
-  Promise.resolve()
-    .then(() => {
-      saveNameOverrides();
-      const oldChanName = activeChannel;
-      const key = tgKey(state.system_id, state.tgid);
+  const key = tgKey(state.system_id, state.tgid);
+  const pendKey = `tg:${key}`;
+  const recorderName = tgMeta(state.system_id, state.tgid).alphaTag || '';
 
-      // Update state
-      state.alpha_tag = newTag;
+  // Kept here first (so a failed write isn't lost); the recorder's own name again drops it.
+  if (newTag === recorderName) delete nameOverrides.tg[key];
+  else nameOverrides.tg[key] = newTag;
+  try { saveNameOverrides(); } catch (err) { console.error('Failed to save the rename:', err); }
+  applyChannelName(state, newTag);
+  cancelChannelEdit();
 
-      // Rebuild channel mapping
-      const newChanName = toChannelName(newTag);
-      let finalName = newChanName;
-      if (channels.has(finalName) && channels.get(finalName) !== state) {
-        finalName = disambiguatedName(newChanName, state.system_id, state.tgid);
-      }
+  if (!syncOn()) return;                       // listen access, or Sync off: stays in this browser
+  if (newTag === recorderName) { pendingRenames.delete(pendKey); return; }
+  if (!rec.connected) {
+    pendingRenames.add(pendKey);
+    serverMsg(`Offline: ${newTag} is kept here until the recorder is back (/sync push)`);
+    return;
+  }
+  pendingRenames.add(pendKey);
+  rec.setTalkgroup(state.system_id, state.tgid, { alphaTag: newTag });
+  setTimeout(() => {
+    if (pendingRenames.has(pendKey)) serverMsg(`The recorder has not confirmed ${newTag} yet; it is kept here (/sync status)`);
+  }, 5000);
+}
 
-      if (finalName !== oldChanName) {
-        renameChannel(oldChanName, finalName);
-      }
-
-      // Cancel edit UI and refresh display
-      cancelChannelEdit();
-      chanNameEl.textContent = finalName;
-      titlebarChan.textContent = state.tgid ? `${finalName} (TG ${state.tgid})` : finalName;
-      renderTree();
-    })
-    .catch(err => {
-      console.error('Failed to save talkgroup tag:', err);
-      cancelChannelEdit();
-    });
+/** The recorder changed a talkgroup's cells (ours, or someone else's): its name wins over one kept here. */
+function handleTalkgroupEdited(m) {
+  const edit = m.edit || {};
+  if (edit.alphaTag !== undefined) {
+    const key = tgKey(m.system, m.talkgroup);
+    const mine = nameOverrides.tg[key];
+    delete nameOverrides.tg[key];
+    try { saveNameOverrides(); } catch { /* storage blocked */ }
+    const wasPending = pendingRenames.delete(`tg:${key}`);
+    const chanName = tgidToChannel.get(key);
+    if (chanName && channels.has(chanName)) applyChannelName(channels.get(chanName), edit.alphaTag);
+    if (wasPending) serverMsg(edit.alphaTag === mine ? `Saved ${mine} on the recorder` : `The recorder's name for ${key} is ${edit.alphaTag || '(none)'}`);
+  }
+  refreshTalkgroups(m.system);
 }
 
 chanEditBtn.addEventListener('click', startChannelEdit);
@@ -5129,7 +5154,7 @@ rec.on('radioResult', answerQuery);
 rec.on('stats', showDecodeRate);
 rec.on('config', () => { if (bootstrapped) loadSystemNames(); });
 rec.on('talkgroups', (m) => refreshTalkgroups(m.system));
-rec.on('talkgroupEdited', (m) => refreshTalkgroups(m.system));
+rec.on('talkgroupEdited', handleTalkgroupEdited);
 rec.on('error', (m) => serverMsg(`Recorder: ${m.message}`));
 
 init();
