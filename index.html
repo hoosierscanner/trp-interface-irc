@@ -1198,6 +1198,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 // The recorder's own client library, served by the recorder on this port.
 import { TrunkClient, LivePlayer, systemName } from "/api/client.js";
 import { unreadList, stepUnread, tabTitle } from "./unread.js";
+import { setUnitName } from "./names.js";
 
 // ══════════════════════════════════════════════════════════════
 // TODO — Enhancement ideas
@@ -1940,6 +1941,132 @@ function closeUnitModal() {
   document.getElementById('unit-modal').classList.remove('visible');
 }
 
+/** A radio's nick changed: update it in every nicklist and in the messages already drawn. */
+function changeNick(uk, oldNick, newNick) {
+  for (const [chanName, ch] of channels) {
+    if (ch.users.has(uk)) ch.users.get(uk).nick = newNick;
+    for (const msg of ch.messages) {
+      if (msg.nick !== oldNick) continue;
+      msg.nick = newNick;
+      if (chanName === activeChannel && msg._el) {
+        const nickNode = msg._el.querySelector('.nick');
+        if (nickNode) {
+          nickNode.textContent = newNick;
+          nickNode.dataset.nick = newNick;
+          nickNode.style.color = nickColor(newNick);
+        } else {
+          refreshMsgEl(msg);
+        }
+      }
+    }
+  }
+}
+
+// ── Radio names on the recorder: systems[i].unitNames.csv, edited through setConfig ──
+const recNameSeen = new Map();     // "short:unit" → the recorder's name when last looked at (to see it change)
+let unitWriteChain = Promise.resolve();
+
+function findSystemConfig(cfg, sys) {
+  return (cfg.systems || []).concat(cfg.conventional || []).find(x => x.shortName === sys);
+}
+
+/** One setConfig that applies `edits` ([{ unit, name }]) to system `sys`; resolves { ok } or { error }. */
+function sendUnitEdits(sys, edits) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (done) return; done = true; off(); clearTimeout(t); resolve(r); };
+    const off = rec.on('configSaved', (m) => finish(m.error ? { error: m.error, refused: true } : { ok: true }));
+    const t = setTimeout(() => finish({ error: 'no answer from the recorder' }), 8000);
+    try {
+      rec.setConfig((cfg) => {
+        const sc = findSystemConfig(cfg, sys);
+        if (!sc) throw new Error(`no system ${sys} in the recorder's config`);
+        let csv = sc.unitNames?.csv ?? '';
+        for (const e of edits) {
+          const r = setUnitName(csv, e.unit, e.name);
+          if (r.error) throw new Error(`${e.unit}: ${r.error}`);
+          csv = r.csv;
+        }
+        sc.unitNames = { ...(sc.unitNames || {}), csv };
+      });
+    } catch (err) {
+      finish({ error: err.message });
+    }
+  });
+}
+
+/** Write radio names to the recorder, one at a time (the config is versioned); retries once if the config changed meanwhile. */
+function writeUnitNames(sys, edits) {
+  const run = async () => {
+    if (!rec.connected) return { error: 'offline' };
+    let r = await sendUnitEdits(sys, edits);
+    if (r.refused) {            // the config changed elsewhere: take the newer one and apply the same edits once more
+      await new Promise(res => setTimeout(res, 400));
+      r = await sendUnitEdits(sys, edits);
+    }
+    return r;
+  };
+  const next = unitWriteChain.then(run, run);
+  unitWriteChain = next.catch(() => {});
+  return next;
+}
+
+/** After a radio rename saved here with Sync on: write it, and report. */
+function syncUnitRename(user, newTag, saveStatus) {
+  const key = unitKey(user.systemId, user.unitId);
+  const pendKey = `unit:${key}`;
+  pendingRenames.add(pendKey);
+  recNameSeen.set(key, recUnitName(user.systemId, user.unitId));
+  if (!rec.connected) {
+    saveStatus.textContent = 'pending';
+    serverMsg(`Offline: ${newTag || key} is kept here until the recorder is back (/sync push)`);
+    return;
+  }
+  writeUnitNames(user.systemId, [{ unit: user.unitId, name: newTag }]).then((r) => {
+    if (r.ok) {
+      pendingRenames.delete(pendKey);
+      delete nameOverrides.unit[key];
+      saveNameOverrides();
+      recNameSeen.set(key, recUnitName(user.systemId, user.unitId));
+      saveStatus.textContent = '\u2713 saved';
+      serverMsg(`Saved ${newTag || '(no name)'} for radio ${user.unitId} on the recorder`);
+    } else {
+      saveStatus.textContent = 'kept here';
+      serverMsg(`Could not save radio ${user.unitId} on the recorder (${r.error}); kept here (/sync status)`);
+    }
+  });
+}
+
+/** The recorder's config changed (anyone's edit): show new radio names, and let its names win over ones kept here. */
+function onConfigChanged() {
+  if (!bootstrapped) return;
+  loadSystemNames();
+  for (const key of Object.keys(nameOverrides.unit)) {
+    const i = key.lastIndexOf(':');
+    const now = recUnitName(key.slice(0, i), Number(key.slice(i + 1)));
+    if (recNameSeen.has(key) && recNameSeen.get(key) !== now) {
+      delete nameOverrides.unit[key];
+      pendingRenames.delete(`unit:${key}`);
+      saveNameOverrides();
+    }
+    recNameSeen.set(key, now);
+  }
+  const seen = new Set();
+  for (const ch of channels.values()) {
+    for (const [uk, user] of ch.users) {
+      if (seen.has(uk)) continue;
+      seen.add(uk);
+      if (nameOverrides.unit[uk]) continue;
+      const name = recUnitName(user.systemId, user.unitId);
+      if (!name || !name.trim() || toNick(name, user.unitId) === user.nick) continue;
+      const oldNick = user.nick;
+      unitNickCache.delete(uk);
+      changeNick(uk, oldNick, resolveNick(user.systemId, user.unitId, name, 'manual'));
+    }
+  }
+  renderNicklist();
+}
+
 function saveUnitTag(user, newTag) {
   const saveBtn = document.getElementById('unit-modal-save');
   const saveStatus = document.getElementById('unit-modal-save-status');
@@ -1968,37 +2095,13 @@ function saveUnitTag(user, newTag) {
       const oldNick = user.nick;
       unitNickCache.delete(uk);
       const newNick = resolveNick(user.systemId, user.unitId, newTag, 'manual');
-
-      for (const [chanName, ch] of channels) {
-        if (ch.users.has(uk)) {
-          ch.users.get(uk).nick = newNick;
-        }
-        let changed = false;
-        for (const msg of ch.messages) {
-          if (msg.nick === oldNick) {
-            msg.nick = newNick;
-            changed = true;
-            if (chanName === activeChannel && msg._el) {
-              const nickNode = msg._el.querySelector('.nick');
-              if (nickNode) {
-                nickNode.textContent = newNick;
-                nickNode.dataset.nick = newNick;
-                nickNode.style.color = nickColor(newNick);
-              } else {
-                refreshMsgEl(msg);
-              }
-            }
-          }
-        }
-        if (changed && chanName !== activeChannel && chanName === STARRED_CHANNEL) {
-          // no-op, kept for symmetry with aggregated channel updates
-        }
-      }
+      changeNick(uk, oldNick, newNick);
 
       user.nick = newNick;
       user.alphaTag = newTag;
       document.getElementById('unit-modal-nick').textContent = newNick;
       renderNicklist();
+      if (syncOn()) syncUnitRename(user, newTag, saveStatus);
     })
     .catch(() => {
       saveBtn.disabled = false;
@@ -5152,7 +5255,7 @@ rec.on('monitorEvent', (m) => { if (bootstrapped && m.kind === 'unitAffiliated')
 rec.on('callsResult', answerQuery);
 rec.on('radioResult', answerQuery);
 rec.on('stats', showDecodeRate);
-rec.on('config', () => { if (bootstrapped) loadSystemNames(); });
+rec.on('config', onConfigChanged);
 rec.on('talkgroups', (m) => refreshTalkgroups(m.system));
 rec.on('talkgroupEdited', handleTalkgroupEdited);
 rec.on('error', (m) => serverMsg(`Recorder: ${m.message}`));
