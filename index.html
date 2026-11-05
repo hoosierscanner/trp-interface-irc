@@ -246,6 +246,18 @@ body::after {
   user-select: none;
 }
 .tree-search-clear.visible { visibility: visible; }
+.tree-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.tree-btn:hover { color: var(--irc-info); border-color: var(--irc-info); }
+.group-count { color: var(--text-faint); font-size: 10px; margin-left: 4px; }
 .tree-more {
   padding: 1px 8px 1px 16px;
   font-size: 12px;
@@ -1091,6 +1103,8 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
       <input class="tree-search-input" id="tree-search" type="text"
              placeholder="Search channels..." spellcheck="false" autocomplete="off">
       <span class="tree-search-clear" id="tree-search-clear">✕</span>
+      <button class="tree-btn" id="tree-expand" title="Expand all groups">⊞</button>
+      <button class="tree-btn" id="tree-collapse" title="Collapse all groups">⊟</button>
     </div>
     <div class="tree-scroll" id="tree-scroll"></div>
     <div class="tree-status" id="tree-status">
@@ -1303,7 +1317,17 @@ const callSrcLists = new Map();
 
 // Activity tracking for channel tree collapse
 const channelHasActivity = new Set();   // channels with real messages
-const groupCollapsed = new Map();       // group collapse state (true = show all, false = collapsed)
+const groupOpen = new Map();            // group name -> true (open) / false (closed); unset: open only if it holds the active channel
+function loadGroupState() {
+  try {
+    const o = JSON.parse(localStorage.getItem('irc_groups') || '{}');
+    for (const [g, v] of Object.entries(o)) if (typeof v === 'boolean') groupOpen.set(g, v);
+  } catch { /* corrupt or blocked storage: start with none */ }
+}
+function saveGroupState() {
+  try { localStorage.setItem('irc_groups', JSON.stringify(Object.fromEntries(groupOpen))); } catch { /* storage blocked */ }
+}
+loadGroupState();
 const channelLoading = new Set();       // prevent duplicate lazy-loads
 const channelLoadedCallIds = new Map(); // chanName -> Set<callId> — deduplicate across bootstrap and lazy load
 const channelLoadedEventIds = new Map(); // chanName -> Set<eventId> — deduplicate unit events across bootstrap and lazy load
@@ -1351,6 +1375,13 @@ treeSearchInput.addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(renderTree, 150);
 });
+function setAllGroups(open) {
+  for (const ch of channels.values()) groupOpen.set(ch.group || 'Ungrouped', open);
+  saveGroupState();
+  renderTree();
+}
+document.getElementById('tree-expand').addEventListener('click', () => setAllGroups(true));
+document.getElementById('tree-collapse').addEventListener('click', () => setAllGroups(false));
 treeSearchClear.addEventListener('click', () => {
   treeSearchInput.value = '';
   treeSearchQuery = '';
@@ -2453,10 +2484,6 @@ function createChannelItem(ch) {
   return el;
 }
 
-function isChannelActive(ch) {
-  return channelHasActivity.has(ch) || ch === activeChannel || (channelUnread.get(ch) || 0) > 0;
-}
-
 let treeFrame = 0;
 function renderTree() {
   if (treeFrame) return;
@@ -2542,98 +2569,25 @@ function renderTreeNow() {
   for (const [groupName, chans] of sortedGroups) {
     const section = document.createElement('div');
     section.className = 'tree-section';
-
-    // Sort channels within group
     chans.sort();
 
-    // Split into active and inactive channels
-    const activeChans = chans.filter(ch => isChannelActive(ch));
-    const inactiveChans = chans.filter(ch => !isChannelActive(ch));
-
-    const isExpanded = groupCollapsed.get(groupName) === true; // explicitly expanded
-    const allInactive = activeChans.length === 0;
-
-    // Compute group-level unread total
+    // Open or closed is the only thing that decides what shows; activity only highlights.
+    const open = groupOpen.has(groupName) ? groupOpen.get(groupName) : chans.includes(activeChannel);
     const groupUnread = chans.reduce((sum, ch) => sum + (channelUnread.get(ch) || 0), 0);
     const unreadBadge = groupUnread > 0
       ? `<span class="group-unread">${groupUnread > 99 ? '99+' : groupUnread}</span>` : '';
 
     const label = document.createElement('div');
-    label.className = 'tree-section-label';
+    label.className = 'tree-section-label' + (open ? '' : ' collapsed');
+    label.innerHTML = groupLabelHtml(groupName) + `<span class="group-count">${chans.length}</span>` + unreadBadge;
+    label.addEventListener('click', () => {
+      groupOpen.set(groupName, !open);
+      saveGroupState();
+      renderTree();
+    });
+    section.appendChild(label);
 
-    if (allInactive && !isExpanded) {
-      if (chans.length <= 3) {
-        // Small inactive group — show all channels directly
-        label.innerHTML = groupLabelHtml(groupName) + unreadBadge;
-        label.addEventListener('click', () => {
-          groupCollapsed.set(groupName, false);
-          renderTree();
-        });
-        section.appendChild(label);
-        for (const ch of chans) {
-          section.appendChild(createChannelItem(ch));
-        }
-      } else {
-        // Large inactive group — collapse with "N more..."
-        label.classList.add('collapsed');
-        label.innerHTML = groupLabelHtml(groupName) + unreadBadge;
-        label.addEventListener('click', () => {
-          groupCollapsed.set(groupName, true);
-          renderTree();
-        });
-        section.appendChild(label);
-
-        const more = document.createElement('div');
-        more.className = 'tree-more';
-        more.textContent = `${chans.length} more...`;
-        more.addEventListener('click', (e) => {
-          e.stopPropagation();
-          groupCollapsed.set(groupName, true);
-          renderTree();
-        });
-        section.appendChild(more);
-      }
-    } else if (isExpanded) {
-      // Fully expanded — show all channels
-      label.innerHTML = groupLabelHtml(groupName) + unreadBadge;
-      label.addEventListener('click', () => {
-        groupCollapsed.set(groupName, false);
-        renderTree();
-      });
-      section.appendChild(label);
-
-      for (const ch of chans) {
-        section.appendChild(createChannelItem(ch));
-      }
-    } else {
-      // Mixed: show active channels + "N more..." expander for inactive
-      label.innerHTML = groupLabelHtml(groupName) + unreadBadge;
-      label.addEventListener('click', () => {
-        groupCollapsed.set(groupName, true);
-        renderTree();
-      });
-      section.appendChild(label);
-
-      for (const ch of activeChans) {
-        section.appendChild(createChannelItem(ch));
-      }
-
-      if (inactiveChans.length > 0 && inactiveChans.length <= 3) {
-        for (const ch of inactiveChans) {
-          section.appendChild(createChannelItem(ch));
-        }
-      } else if (inactiveChans.length > 3) {
-        const more = document.createElement('div');
-        more.className = 'tree-more';
-        more.textContent = `${inactiveChans.length} more...`;
-        more.addEventListener('click', (e) => {
-          e.stopPropagation();
-          groupCollapsed.set(groupName, true);
-          renderTree();
-        });
-        section.appendChild(more);
-      }
-    }
+    if (open) for (const ch of chans) section.appendChild(createChannelItem(ch));
 
     treeScroll.appendChild(section);
   }
