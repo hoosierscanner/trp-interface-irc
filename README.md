@@ -15,6 +15,12 @@ plugin.
   but not in the file gets a channel named by its number. Channels with activity show; the rest
   fold into "N more...". Search, unread counts, **Read All**, a star for favourites (they gather
   in the **Starred** channel) and a scan toggle.
+- **Stable tree**: a group is open or closed as you left it (remembered), never changed by activity; the
+  group label shows its channel count and unread total, and ⊞ / ⊟ beside the search box open or close
+  every group. Channels with unread messages are highlighted in place.
+- **Unread** (pinned above the groups, only when something is unread): the channels with unread
+  messages, newest first, a count each; click one to jump to it. **Read All** is in its header;
+  **Alt+↓ / Alt+↑** jump to the next / previous unread channel; the tab title carries the total.
 - **Messages**: a recorded call is a line per keyup, the radio named; when its transcript comes
   the text replaces the placeholder, one line per segment. A call skipped or failed by the
   transcriber shows the reason, muted. A call on the air shows as the radio "typing". Scroll up
@@ -23,7 +29,7 @@ plugin.
   registry has them, and those that talked; a radio that affiliates elsewhere parts and joins
   live. Click a nick for the radio's transmissions and affiliations.
 - **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,
-  `/scanner`, `/listen`, `/volume`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
+  `/scanner`, `/listen`, `/volume`, `/sync`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
 - The theme picker at the top switches between the themes (Ctrl+Shift+T cycles them; `?theme=matrix` in the address picks one, kept like a pick). Your own themes go in a `theme-local.js` beside `index.html`, which an upgrade never touches; [theme-local.example.js](https://github.com/trunk-reporter/trp-themes/blob/main/theme-local.example.js) is one to copy. The themes are [trp-themes](https://github.com/trunk-reporter/trp-themes) 1.0.0's, pared to the variables this page uses, with the default written into the page so it is styled before (or without) the engine; `node pare.mjs <this folder>` there refreshes them.
 
 Renaming a channel (✎) or a radio (its card's Save): see **Name sync** below. Favourites, scan list, panel widths and theme are kept in the browser too.
