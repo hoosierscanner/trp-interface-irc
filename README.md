@@ -55,9 +55,9 @@ computer's own.
 
 ## Transcripts
 
-They come from the **transcribe plugin**'s HTTP API, at `http://127.0.0.1:8767` unless you say
-otherwise: `?transcribe=http://host:port` in the address, or `/api http://host:port` in the
-page (remembered; `/api reset` for the default). In the plugin's settings:
+They come from the **transcribe plugin**'s HTTP API, at `http://<this page's host>:8767` unless you
+say otherwise: `/api http://host:port` in the page (remembered; `/api reset` for the default), or
+`?transcribe=http://host:port` in the address (that visit only, never remembered). In the plugin's settings:
 
 - `http.port` must be set (e.g. `8767`);
 - `http.origins` must list this interface's origin, exactly as the browser shows it, e.g.

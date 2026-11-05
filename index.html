@@ -1196,17 +1196,26 @@ import { TrunkClient, LivePlayer, systemName } from "/api/client.js";
 
 // ══════════════════════════════════════════════════════════════
 // CONFIG — the transcribe plugin's HTTP API
-// Default http://127.0.0.1:8767; ?transcribe=http://host:port in the URL, or /api <url>,
-// sets it, and it is remembered (localStorage). The recorder is the page's own host.
+// Default: this page's own host, port 8767 (the plugin runs beside the recorder). /api <url> sets
+// it and it is remembered (localStorage); ?transcribe=http://host:port in the URL overrides it
+// for that page load only, and is never remembered (a crafted link can't re-point the page for good).
 // ══════════════════════════════════════════════════════════════
 const params = new URLSearchParams(location.search);
-const TRANSCRIBE_DEFAULT = 'http://127.0.0.1:8767';
+const TRANSCRIBE_DEFAULT = `http://${location.hostname || '127.0.0.1'}:8767`;
+function cleanHttpBase(v) {
+  try {
+    const u = new URL(v);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return (u.origin + u.pathname).replace(/\/+$/, '');
+  } catch (e) { return null; }
+}
 function loadTranscribeBase() {
-  const fromUrl = params.get('transcribe');
-  if (fromUrl) localStorage.setItem('irc_transcribe', fromUrl);
-  return (fromUrl || localStorage.getItem('irc_transcribe') || TRANSCRIBE_DEFAULT).replace(/\/+$/, '');
+  const fromUrl = cleanHttpBase(params.get('transcribe') || '');
+  if (fromUrl) return fromUrl;
+  return cleanHttpBase(localStorage.getItem('irc_transcribe') || '') || TRANSCRIBE_DEFAULT;
 }
 let TRANSCRIBE_BASE = loadTranscribeBase();
+let badTranscriptWarned = false;
 
 const MAX_MESSAGES = 500;        // per channel scrollback
 const NICK_WIDTH = 130;          // px
@@ -2334,8 +2343,8 @@ function refreshMsgEl(m) {
 }
 
 function esc(s) {
-  if (!s) return '';
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  if (s == null || s === '') return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function serverMsg(text) {
@@ -3576,7 +3585,7 @@ function connectTranscripts() {
 
   es.addEventListener('transcript', (e) => {
     lastEventId = e.lastEventId;
-    try { handleTranscription(JSON.parse(e.data)); } catch (err) { console.warn('bad transcript event:', err); }
+    try { handleTranscription(JSON.parse(e.data)); } catch (err) { console.warn('bad transcript event:', err); if (!badTranscriptWarned) { badTranscriptWarned = true; serverMsg('A transcript event could not be read (the plugin may have changed its format); see the console.'); } }
   });
 }
 
@@ -4260,11 +4269,11 @@ function handleCommand(cmd) {
         TRANSCRIBE_BASE = TRANSCRIBE_DEFAULT;
         connectTranscripts();
       } else if (arg) {
-        if (!/^https?:\/\//.test(arg)) {
+        if (!cleanHttpBase(arg)) {
           addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'Usage: /api http://host:port — the transcribe plugin\'s address; /api reset — the default' });
           break;
         }
-        TRANSCRIBE_BASE = arg.replace(/\/+$/, '');
+        TRANSCRIBE_BASE = cleanHttpBase(arg);
         localStorage.setItem('irc_transcribe', TRANSCRIBE_BASE);
         connectTranscripts();
       }
