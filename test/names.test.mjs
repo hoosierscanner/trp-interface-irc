@@ -46,3 +46,22 @@ test('trims the name', () => {
 test('unit as string works and matches numerically-equal text', () => {
   assert.equal(csv(setUnitName('007,A\n', '007', 'B')), '007,B\n');
 });
+
+import { exactUnitName } from '../names.js';
+
+test('exact line below a regex row moves above it (the regex would win otherwise)', () => {
+  assert.equal(
+    csv(setUnitName('/^1\\d{3}$/,Engine\n1234,Old\n', 1234, 'New')),
+    '1234,New\n/^1\\d{3}$/,Engine\n');
+});
+test('exact line already above a regex row stays put', () => {
+  assert.equal(csv(setUnitName('1234,Old\n/^1\\d{3}$/,Engine\n', 1234, 'New')), '1234,New\n/^1\\d{3}$/,Engine\n');
+});
+test('exactUnitName reads only the exact line', () => {
+  assert.equal(exactUnitName('/^1\\d{3}$/,Engine\n1234,Mine\n', 1234), 'Mine');
+  assert.equal(exactUnitName('/^1\\d{3}$/,Engine\n', 1234), '');
+  assert.equal(exactUnitName('', 1), '');
+});
+test('a comma inside the regex does not confuse the shadow check', () => {
+  assert.equal(csv(setUnitName('/^1\\d{2,3}$/,Eng\n1234,Old\n', 1234, 'New')), '1234,New\n/^1\\d{2,3}$/,Eng\n');
+});

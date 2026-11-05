@@ -1198,7 +1198,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 // The recorder's own client library, served by the recorder on this port.
 import { TrunkClient, LivePlayer, systemName } from "/api/client.js";
 import { unreadList, stepUnread, tabTitle } from "./unread.js";
-import { setUnitName } from "./names.js";
+import { setUnitName, exactUnitName } from "./names.js";
 
 // ══════════════════════════════════════════════════════════════
 // TODO — Enhancement ideas
@@ -1327,6 +1327,10 @@ function setSync(on) {
 }
 function localRenameCount() { return Object.keys(nameOverrides.tg).length + Object.keys(nameOverrides.unit).length; }
 /** /sync [on|off|status|push|pull confirm] */
+/** A sync outcome the user should see: in the channel they are looking at (the status channel is easy to miss). */
+function syncNotice(text) {
+  addMsg(activeChannel, { ts: ts(), kind: 'notice', text });
+}
 function syncCommand(arg, parts2) {
   const say = (text) => addMsg(activeChannel, { ts: ts(), kind: 'notice', text });
   if (arg === 'on' || arg === 'off') {
@@ -2027,6 +2031,12 @@ function changeNick(uk, oldNick, newNick) {
 const recNameSeen = new Map();     // "short:unit" → the recorder's name when last looked at (to see it change)
 let unitWriteChain = Promise.resolve();
 
+/** The name on the recorder's exact unit-names line only (not an alias heard on the air, which arrives apart from the config). */
+function csvUnitName(sys, unit) {
+  const sc = findSystemConfig(rec.config || {}, sys);
+  return exactUnitName(sc?.unitNames?.csv, unit);
+}
+
 function findSystemConfig(cfg, sys) {
   return (cfg.systems || []).concat(cfg.conventional || []).find(x => x.shortName === sys);
 }
@@ -2073,14 +2083,18 @@ function writeUnitNames(sys, edits) {
 }
 
 /** After a radio rename saved here with Sync on: write it, and report. */
-function syncUnitRename(user, newTag, saveStatus) {
+function syncUnitRename(user, newTag, saveStatus, hadLocal) {
   const key = unitKey(user.systemId, user.unitId);
   const pendKey = `unit:${key}`;
+  // Clearing a name that was only kept here means "the recorder's name again": nothing to send,
+  // or the recorder's own line would be deleted.
+  if (!newTag && hadLocal) { pendingRenames.delete(pendKey); return; }
   pendingRenames.add(pendKey);
-  recNameSeen.set(key, recUnitName(user.systemId, user.unitId));
+  recNameSeen.set(key, csvUnitName(user.systemId, user.unitId));
   if (!rec.connected) {
     saveStatus.textContent = 'pending';
-    serverMsg(`Offline: ${newTag || key} is kept here until the recorder is back (/sync push)`);
+    saveStatus.style.color = 'var(--irc-warning)';
+    syncNotice(`Offline: ${newTag || key} is kept here until the recorder is back (/sync push)`);
     return;
   }
   writeUnitNames(user.systemId, [{ unit: user.unitId, name: newTag }]).then((r) => {
@@ -2088,12 +2102,14 @@ function syncUnitRename(user, newTag, saveStatus) {
       pendingRenames.delete(pendKey);
       delete nameOverrides.unit[key];
       saveNameOverrides();
-      recNameSeen.set(key, recUnitName(user.systemId, user.unitId));
+      recNameSeen.set(key, csvUnitName(user.systemId, user.unitId));
       saveStatus.textContent = '\u2713 saved';
-      serverMsg(`Saved ${newTag || '(no name)'} for radio ${user.unitId} on the recorder`);
+      saveStatus.style.color = 'var(--irc-success)';
+      syncNotice(`Saved ${newTag || '(no name)'} for radio ${user.unitId} on the recorder`);
     } else {
       saveStatus.textContent = 'kept here';
-      serverMsg(`Could not save radio ${user.unitId} on the recorder (${r.error}); kept here (/sync status)`);
+      saveStatus.style.color = 'var(--irc-warning)';
+      syncNotice(`Could not save radio ${user.unitId} on the recorder (${r.error}); kept here (/sync status)`);
     }
   });
 }
@@ -2104,7 +2120,7 @@ function onConfigChanged() {
   loadSystemNames();
   for (const key of Object.keys(nameOverrides.unit)) {
     const i = key.lastIndexOf(':');
-    const now = recUnitName(key.slice(0, i), Number(key.slice(i + 1)));
+    const now = csvUnitName(key.slice(0, i), Number(key.slice(i + 1)));
     if (recNameSeen.has(key) && recNameSeen.get(key) !== now) {
       delete nameOverrides.unit[key];
       pendingRenames.delete(`unit:${key}`);
@@ -2140,6 +2156,7 @@ function saveUnitTag(user, newTag) {
 
   // Kept in this browser (listen access can't change the recorder's unit names); empty: the recorder's name again.
   const renameKey = unitKey(user.systemId, user.unitId);
+  const hadLocal = Boolean(nameOverrides.unit[renameKey]);
   if (newTag) nameOverrides.unit[renameKey] = newTag;
   else delete nameOverrides.unit[renameKey];
   Promise.resolve()
@@ -2149,7 +2166,7 @@ function saveUnitTag(user, newTag) {
       saveBtn.disabled = true;
       saveStatus.textContent = '\u2713';
       saveStatus.style.color = 'var(--irc-success)';
-      setTimeout(() => { saveStatus.textContent = ''; }, 2000);
+      setTimeout(() => { if (saveStatus.textContent === '\u2713') saveStatus.textContent = ''; }, 2000);
 
       // Bust nick cache and update nick across users + already-rendered messages
       const uk = unitKey(user.systemId, user.unitId);
@@ -2162,7 +2179,7 @@ function saveUnitTag(user, newTag) {
       user.alphaTag = newTag;
       document.getElementById('unit-modal-nick').textContent = newNick;
       renderNicklist();
-      if (syncOn()) syncUnitRename(user, newTag, saveStatus);
+      if (syncOn()) syncUnitRename(user, newTag, saveStatus, hadLocal);
     })
     .catch(() => {
       saveBtn.disabled = false;
@@ -3013,13 +3030,13 @@ function saveChannelTag(newTag) {
   if (newTag === recorderName) { pendingRenames.delete(pendKey); return; }
   if (!rec.connected) {
     pendingRenames.add(pendKey);
-    serverMsg(`Offline: ${newTag} is kept here until the recorder is back (/sync push)`);
+    syncNotice(`Offline: ${newTag} is kept here until the recorder is back (/sync push)`);
     return;
   }
   pendingRenames.add(pendKey);
   rec.setTalkgroup(state.system_id, state.tgid, { alphaTag: newTag });
   setTimeout(() => {
-    if (pendingRenames.has(pendKey)) serverMsg(`The recorder has not confirmed ${newTag} yet; it is kept here (/sync status)`);
+    if (pendingRenames.has(pendKey)) syncNotice(`The recorder has not confirmed ${newTag} yet; it is kept here (/sync status)`);
   }, 5000);
 }
 
@@ -3034,7 +3051,7 @@ function handleTalkgroupEdited(m) {
     const wasPending = pendingRenames.delete(`tg:${key}`);
     const chanName = tgidToChannel.get(key);
     if (chanName && channels.has(chanName)) applyChannelName(channels.get(chanName), edit.alphaTag);
-    if (wasPending) serverMsg(edit.alphaTag === mine ? `Saved ${mine} on the recorder` : `The recorder's name for ${key} is ${edit.alphaTag || '(none)'}`);
+    if (wasPending) syncNotice(edit.alphaTag === mine ? `Saved ${mine} on the recorder` : `The recorder's name for ${key} is ${edit.alphaTag || '(none)'}`);
   }
   refreshTalkgroups(m.system);
 }
