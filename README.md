@@ -30,7 +30,7 @@ plugin.
   live. Click a nick for the radio's transmissions and affiliations.
 - **Ignore**: 🚫 on a channel row hides that talkgroup in this browser (no messages, unread, scanner or live
   audio); with Sync on, ⛔ asks the recorder to ignore it for everyone (the talkgroup file's Ignore column).
-  Ignored channels fold into **Ignored (N)** at the bottom of the tree, where *show* / *record* bring them
+  The channel bar has the same two buttons (lit when ignored), so you can see and flip it while the channel is open. Ignored channels fold into **Ignored (N)** at the bottom of the tree, where *show* / *record* bring them
   back. `/ignore`, `/ignore recorder`, `/unignore`, `/unignore recorder`. The tree and nicklist have
   always-visible scrollbars.
 - **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,

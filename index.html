@@ -447,6 +447,12 @@ body::after {
   border-radius: 3px; line-height: 1; display: none;
 }
 .chan-edit-btn:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.chan-ign-btn {
+  background: none; border: 1px solid var(--border); color: var(--text-muted);
+  cursor: pointer; font-size: 12px; padding: 1px 8px; border-radius: 3px; white-space: nowrap;
+}
+.chan-ign-btn:hover { color: var(--irc-info); border-color: var(--irc-info); }
+.chan-ign-btn.on { color: var(--irc-warning); border-color: var(--irc-warning); }
 .chan-edit-row {
   display: flex; align-items: center; gap: 6px;
 }
@@ -1142,6 +1148,8 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
       <span class="chan-mode" id="chan-mode"></span>
       <span class="chan-topic" id="chan-topic">Connecting to the recorder...</span>
       <span class="chan-count" id="chan-count"></span>
+      <button class="chan-ign-btn" id="chan-ign-local" style="display:none"></button>
+      <button class="chan-ign-btn" id="chan-ign-rec" style="display:none"></button>
     </div>
     <div class="messages" id="messages"></div>
     <div class="typing-bar" id="typing-bar"></div>
@@ -1331,6 +1339,7 @@ const pendingRenames = new Set();   // "tg:short:tgid" / "unit:short:unit": rena
 function syncPref() { try { return localStorage.getItem('irc_sync') !== '0'; } catch { return true; } }
 function syncOn() { return hasControl && syncPref(); }
 function updateSyncUI() {
+  updateIgnoreBar();
   const b = document.getElementById('sync-btn');
   if (!b) return;
   b.textContent = hasControl ? (syncPref() ? 'SYNC' : 'SYNC off') : 'SYNC n/a';
@@ -1470,11 +1479,26 @@ function isIgnoredRecorder(ch) {
   return Boolean(st && st.tgid && rec.talkgroups(st.system_id).get(st.tgid)?.ignore);
 }
 function isIgnored(ch) { return isIgnoredLocal(ch) || isIgnoredRecorder(ch); }
-function leaveIfActive(ch) { if (ch === activeChannel) switchChannel(STATUS_CHANNEL); }
+/** The channel bar's ignore buttons: shown for a talkgroup channel, lit when it is ignored. */
+function updateIgnoreBar() {
+  const local = document.getElementById('chan-ign-local');
+  const recBtn = document.getElementById('chan-ign-rec');
+  if (!local || !recBtn) return;
+  const isTg = Boolean(channelKey(activeChannel));
+  const il = isTg && isIgnoredLocal(activeChannel), ir = isTg && isIgnoredRecorder(activeChannel);
+  local.style.display = isTg ? '' : 'none';
+  local.classList.toggle('on', il);
+  local.textContent = il ? '\uD83D\uDEAB Ignored here (show)' : '\uD83D\uDEAB Ignore here';
+  local.title = il ? 'Stop ignoring this talkgroup in this browser' : 'Hide this talkgroup in this browser';
+  recBtn.style.display = isTg && (syncOn() || ir) ? '' : 'none';
+  recBtn.classList.toggle('on', ir);
+  recBtn.textContent = ir ? '\u26D4 Recorder ignores it (record)' : '\u26D4 Ignore on recorder';
+  recBtn.title = ir ? 'Tell the recorder to record this talkgroup again' : 'Tell the recorder to stop recording this talkgroup for everyone';
+}
 function toggleIgnoreLocal(ch) {
   const k = channelKey(ch);
   if (!k) return;
-  if (ignoredLocal.has(k)) ignoredLocal.delete(k); else { ignoredLocal.add(k); channelUnread.set(ch, 0); leaveIfActive(ch); }
+  if (ignoredLocal.has(k)) ignoredLocal.delete(k); else { ignoredLocal.add(k); channelUnread.set(ch, 0); }
   saveIgnoredLocal();
   liveWantedChanged();
   renderTree();
@@ -1486,8 +1510,10 @@ function setIgnoreRecorder(ch, on) {
   if (on && !confirm(`Tell the recorder to ignore ${ch}? It stops recording this talkgroup for everyone until you un-ignore it.`)) return;
   rec.setTalkgroup(st.system_id, st.tgid, { ignore: on });
   syncNotice(`${on ? 'Ignoring' : 'Un-ignoring'} ${ch} on the recorder...`);
-  if (on) { channelUnread.set(ch, 0); leaveIfActive(ch); }
+  if (on) channelUnread.set(ch, 0);
 }
+document.getElementById('chan-ign-local').addEventListener('click', () => toggleIgnoreLocal(activeChannel));
+document.getElementById('chan-ign-rec').addEventListener('click', () => setIgnoreRecorder(activeChannel, !isIgnoredRecorder(activeChannel)));
 const channelLoading = new Set();       // prevent duplicate lazy-loads
 const channelLoadedCallIds = new Map(); // chanName -> Set<callId> — deduplicate across bootstrap and lazy load
 const channelLoadedEventIds = new Map(); // chanName -> Set<eventId> — deduplicate unit events across bootstrap and lazy load
@@ -2802,6 +2828,7 @@ function jumpUnread(dir) {
 
 function renderTreeNow() {
   updateTabTitle();
+  updateIgnoreBar();
   // Group channels by group field
   const groups = new Map();
   for (const [name, ch] of channels) {
@@ -2951,6 +2978,9 @@ function renderTreeNow() {
         const name = document.createElement('span');
         name.className = 'ign-name';
         name.textContent = ch;
+        name.style.cursor = 'pointer';
+        name.title = 'Open it (read only: nothing new is added while ignored)';
+        name.addEventListener('click', () => switchChannel(ch));
         row.appendChild(name);
         if (isIgnoredLocal(ch)) {
           const b = document.createElement('button');
