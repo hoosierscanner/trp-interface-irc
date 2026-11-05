@@ -19,7 +19,7 @@ plugin.
   group label shows its channel count and unread total, and ⊞ / ⊟ beside the search box open or close
   every group. Channels with unread messages are highlighted in place.
 - **Unread** (pinned above the groups, only when something is unread): the channels with unread
-  messages, newest first, a count each; click one to jump to it. **Read All** is in its header;
+  messages, newest first, a count each; click one to jump to it; click the header to fold it (remembered). **Read All** is in its header;
   **Alt+↓ / Alt+↑** jump to the next / previous unread channel; the tab title carries the total.
 - **Messages**: a recorded call is a line per keyup, the radio named; when its transcript comes
   the text replaces the placeholder, one line per segment. A call skipped or failed by the

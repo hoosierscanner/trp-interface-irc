@@ -285,8 +285,8 @@ body::after {
   cursor: pointer;
 }
 .tree-section-label .nb { white-space: nowrap; }
-.unread-label { display: flex; align-items: center; justify-content: space-between; color: var(--irc-warning); cursor: default; }
-.unread-label::before { content: none; }
+.unread-label { display: flex; align-items: center; color: var(--irc-warning); cursor: pointer; }
+.unread-label > span { flex: 1; }
 .tree-section-label:hover { color: var(--text-mid); }
 .tree-section-label::before { content: '▾ '; font-size: 10px; }
 .tree-section-label.collapsed::before { content: '▸ '; }
@@ -1427,6 +1427,7 @@ const callSrcLists = new Map();
 // Activity tracking for channel tree collapse
 const channelHasActivity = new Set();   // channels with real messages
 const groupOpen = new Map();            // group name -> true (open) / false (closed); unset: open only if it holds the active channel
+let unreadCollapsed = (() => { try { return localStorage.getItem('irc_unread_collapsed') === '1'; } catch { return false; } })();
 function loadGroupState() {
   try {
     const o = JSON.parse(localStorage.getItem('irc_groups') || '{}');
@@ -2790,18 +2791,23 @@ function renderTreeNow() {
     const unSection = document.createElement('div');
     unSection.className = 'tree-section unread-section';
     const unLabel = document.createElement('div');
-    unLabel.className = 'tree-section-label unread-label';
+    unLabel.className = 'tree-section-label unread-label' + (unreadCollapsed ? ' collapsed' : '');
     const unText = document.createElement('span');
     unText.textContent = `Unread \u00b7 ${total > 99 ? '99+' : total} in ${unreadNow.length}`;
-    unText.title = 'Alt+Down / Alt+Up: next / previous unread channel';
+    unText.title = 'Click to fold or unfold. Alt+Down / Alt+Up: next / previous unread channel';
     const unRead = document.createElement('button');
     unRead.className = 'read-all-btn';
     unRead.textContent = 'Read All';
-    unRead.addEventListener('click', markAllRead);
+    unRead.addEventListener('click', (e) => { e.stopPropagation(); markAllRead(); });
+    unLabel.addEventListener('click', () => {
+      unreadCollapsed = !unreadCollapsed;
+      try { localStorage.setItem('irc_unread_collapsed', unreadCollapsed ? '1' : '0'); } catch { /* storage blocked */ }
+      renderTree();
+    });
     unLabel.appendChild(unText);
     unLabel.appendChild(unRead);
     unSection.appendChild(unLabel);
-    for (const e of unreadNow) unSection.appendChild(createChannelItem(e.name));
+    if (!unreadCollapsed) for (const e of unreadNow) unSection.appendChild(createChannelItem(e.name));
     treeScroll.appendChild(unSection);
   }
 
