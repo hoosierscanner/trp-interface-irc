@@ -28,8 +28,13 @@ plugin.
 - **Nicklist** (right): the radios affiliated with the talkgroup, as the recorder's radio
   registry has them, and those that talked; a radio that affiliates elsewhere parts and joins
   live. Click a nick for the radio's transmissions and affiliations.
+- **Ignore**: 🚫 on a channel row hides that talkgroup in this browser (no messages, unread, scanner or live
+  audio); with Sync on, ⛔ asks the recorder to ignore it for everyone (the talkgroup file's Ignore column).
+  Ignored channels fold into **Ignored (N)** at the bottom of the tree, where *show* / *record* bring them
+  back. `/ignore`, `/ignore recorder`, `/unignore`, `/unignore recorder`. The tree and nicklist have
+  always-visible scrollbars.
 - **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,
-  `/scanner`, `/listen`, `/volume`, `/sync`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
+  `/scanner`, `/listen`, `/volume`, `/sync`, `/ignore`, `/unignore`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
 - The theme picker at the top switches between the themes (Ctrl+Shift+T cycles them; `?theme=matrix` in the address picks one, kept like a pick). Your own themes go in a `theme-local.js` beside `index.html`, which an upgrade never touches; [theme-local.example.js](https://github.com/trunk-reporter/trp-themes/blob/main/theme-local.example.js) is one to copy. The themes are [trp-themes](https://github.com/trunk-reporter/trp-themes) 1.0.0's, pared to the variables this page uses, with the default written into the page so it is styled before (or without) the engine; `node pare.mjs <this folder>` there refreshes them.
 
 Renaming a channel (✎) or a radio (its card's Save): see **Name sync** below. Favourites, scan list, panel widths and theme are kept in the browser too.

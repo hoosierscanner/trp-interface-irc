@@ -272,9 +272,11 @@ body::after {
   overflow-y: auto;
   overflow-x: hidden;
 }
-.tree-scroll::-webkit-scrollbar { width: 6px; }
-.tree-scroll::-webkit-scrollbar-track { background: transparent; }
-.tree-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.tree-scroll, .nicklist-entries { scrollbar-width: thin; scrollbar-color: var(--text-faint) var(--bg); }
+.tree-scroll::-webkit-scrollbar { width: 8px; }
+.tree-scroll::-webkit-scrollbar-track { background: var(--bg); }
+.tree-scroll::-webkit-scrollbar-thumb { background: var(--text-faint); border-radius: 4px; }
+.tree-scroll::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 .tree-section { padding: 2px 0; }
 .tree-section-label {
@@ -355,6 +357,22 @@ body::after {
   display: inline-block;
   line-height: 14px;
 }
+.ign-icon {
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+  padding: 0 1px;
+}
+.channel-item:hover .ign-icon { opacity: 1; }
+.ign-icon:hover { color: var(--irc-warning); }
+.ignored-row { display: flex; align-items: center; gap: 6px; padding: 1px 8px 1px 16px; font-size: 12px; color: var(--text-faint); }
+.ignored-row .ign-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ignored-row .ign-kind { font-size: 10px; }
+.ignored-row button { background: none; border: 1px solid var(--border); border-radius: 3px; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0 4px; }
+.ignored-row button:hover { color: var(--irc-info); border-color: var(--irc-info); }
 .scan-icon {
   cursor: pointer;
   opacity: 0;
@@ -695,9 +713,10 @@ body::after {
   overflow-y: auto;
   flex: 1;
 }
-.nicklist-entries::-webkit-scrollbar { width: 6px; }
-.nicklist-entries::-webkit-scrollbar-track { background: transparent; }
-.nicklist-entries::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.nicklist-entries::-webkit-scrollbar { width: 8px; }
+.nicklist-entries::-webkit-scrollbar-track { background: var(--bg); }
+.nicklist-entries::-webkit-scrollbar-thumb { background: var(--text-faint); border-radius: 4px; }
+.nicklist-entries::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
 .nick-item {
   padding: 1px 10px;
@@ -1018,7 +1037,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   }
 
   /* Favorite stars and scan icons always visible (no hover on touch) */
-  .fav-star, .scan-icon { opacity: 1; }
+  .fav-star, .scan-icon, .ign-icon { opacity: 1; }
 
   /* Card-style messages for mobile */
   .msg {
@@ -1438,6 +1457,37 @@ function saveGroupState() {
   try { localStorage.setItem('irc_groups', JSON.stringify(Object.fromEntries(groupOpen))); } catch { /* storage blocked */ }
 }
 loadGroupState();
+
+// ── Ignoring talkgroups ──
+// Local: hidden here only (irc_ignored, "short:tg" keys). Recorder: the talkgroup file's Ignore column, written
+// with setTalkgroup (control access); the recorder then stops recording it for everyone.
+const ignoredLocal = (() => { try { return new Set(JSON.parse(localStorage.getItem('irc_ignored') || '[]')); } catch { return new Set(); } })();
+function saveIgnoredLocal() { try { localStorage.setItem('irc_ignored', JSON.stringify([...ignoredLocal])); } catch { /* storage blocked */ } }
+let ignoredOpen = (() => { try { return localStorage.getItem('irc_ignored_open') === '1'; } catch { return false; } })();
+function isIgnoredLocal(ch) { const k = channelKey(ch); return Boolean(k) && ignoredLocal.has(k); }
+function isIgnoredRecorder(ch) {
+  const st = channels.get(ch);
+  return Boolean(st && st.tgid && rec.talkgroups(st.system_id).get(st.tgid)?.ignore);
+}
+function isIgnored(ch) { return isIgnoredLocal(ch) || isIgnoredRecorder(ch); }
+function leaveIfActive(ch) { if (ch === activeChannel) switchChannel(STATUS_CHANNEL); }
+function toggleIgnoreLocal(ch) {
+  const k = channelKey(ch);
+  if (!k) return;
+  if (ignoredLocal.has(k)) ignoredLocal.delete(k); else { ignoredLocal.add(k); channelUnread.set(ch, 0); leaveIfActive(ch); }
+  saveIgnoredLocal();
+  liveWantedChanged();
+  renderTree();
+}
+function setIgnoreRecorder(ch, on) {
+  const st = channels.get(ch);
+  if (!st || !st.tgid) return;
+  if (!syncOn()) { syncNotice('Ignoring on the recorder needs control access with Sync on.'); return; }
+  if (on && !confirm(`Tell the recorder to ignore ${ch}? It stops recording this talkgroup for everyone until you un-ignore it.`)) return;
+  rec.setTalkgroup(st.system_id, st.tgid, { ignore: on });
+  syncNotice(`${on ? 'Ignoring' : 'Un-ignoring'} ${ch} on the recorder...`);
+  if (on) { channelUnread.set(ch, 0); leaveIfActive(ch); }
+}
 const channelLoading = new Set();       // prevent duplicate lazy-loads
 const channelLoadedCallIds = new Map(); // chanName -> Set<callId> — deduplicate across bootstrap and lazy load
 const channelLoadedEventIds = new Map(); // chanName -> Set<eventId> — deduplicate unit events across bootstrap and lazy load
@@ -2400,6 +2450,8 @@ function resolveNick(systemId, unitId, alphaTag, source) {
 function addMsg(channel, msg, skipForward) {
   const state = channels.get(channel);
   if (!state) return;
+  // Ignored talkgroups show nothing (notices still do)
+  if (msg.kind !== 'notice' && (isIgnored(channel) || (msg.originChannel && isIgnored(msg.originChannel)))) return;
 
   state.messages.push(msg);
   if (state.messages.length > MAX_MESSAGES) {
@@ -2694,6 +2746,22 @@ function createChannelItem(ch) {
     });
     rightCluster.appendChild(scanIcon);
 
+    // Ignore here (and, with Sync on, on the recorder)
+    const ign = document.createElement('span');
+    ign.className = 'ign-icon';
+    ign.textContent = '\uD83D\uDEAB';
+    ign.title = 'Ignore here (hide it in this browser)';
+    ign.addEventListener('click', (e) => { e.stopPropagation(); toggleIgnoreLocal(ch); });
+    rightCluster.appendChild(ign);
+    if (syncOn()) {
+      const ignRec = document.createElement('span');
+      ignRec.className = 'ign-icon';
+      ignRec.textContent = '\u26D4';
+      ignRec.title = 'Ignore on the recorder (it stops recording this talkgroup for everyone)';
+      ignRec.addEventListener('click', (e) => { e.stopPropagation(); setIgnoreRecorder(ch, true); });
+      rightCluster.appendChild(ignRec);
+    }
+
     // Favorite star
     const star = document.createElement('span');
     star.className = 'fav-star' + (isFavorite(ch) ? ' active' : '');
@@ -2719,7 +2787,7 @@ function renderTree() {
 
 /** Channels with unread messages, newest first (the Starred meta-channel and status are left out: they repeat or add noise). */
 function unreadEntries() {
-  return unreadList(channelUnread, channelLastMsgTs).filter(e => e.name !== STARRED_CHANNEL && e.name !== STATUS_CHANNEL && channels.has(e.name));
+  return unreadList(channelUnread, channelLastMsgTs).filter(e => e.name !== STARRED_CHANNEL && e.name !== STATUS_CHANNEL && channels.has(e.name) && !isIgnored(e.name));
 }
 
 function updateTabTitle() {
@@ -2737,7 +2805,7 @@ function renderTreeNow() {
   // Group channels by group field
   const groups = new Map();
   for (const [name, ch] of channels) {
-    if (name === STATUS_CHANNEL || name === STARRED_CHANNEL) continue;
+    if (name === STATUS_CHANNEL || name === STARRED_CHANNEL || isIgnored(name)) continue;
     const g = ch.group || 'Ungrouped';
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(name);
@@ -2749,7 +2817,7 @@ function renderTreeNow() {
   if (treeSearchQuery) {
     const matches = [];
     for (const [name, ch] of channels) {
-      if (name === STATUS_CHANNEL) continue;
+      if (name === STATUS_CHANNEL || isIgnored(name)) continue;
       const searchable = (name + ' ' + (ch.alpha_tag || '') + ' ' + (ch.group || '')).toLowerCase();
       if (searchable.includes(treeSearchQuery)) matches.push(name);
     }
@@ -2812,7 +2880,7 @@ function renderTreeNow() {
   }
 
   // Favorites section (with starred meta-channel at top)
-  const favChans = [...channels.keys()].filter(ch => ch !== STATUS_CHANNEL && ch !== STARRED_CHANNEL && isFavorite(ch));
+  const favChans = [...channels.keys()].filter(ch => ch !== STATUS_CHANNEL && ch !== STARRED_CHANNEL && isFavorite(ch) && !isIgnored(ch));
   if (favChans.length > 0 || channels.has(STARRED_CHANNEL)) {
     const favSection = document.createElement('div');
     favSection.className = 'tree-section';
@@ -2860,6 +2928,54 @@ function renderTreeNow() {
     if (open) for (const ch of chans) section.appendChild(createChannelItem(ch));
 
     treeScroll.appendChild(section);
+  }
+
+  // Ignored: folded by default, so one can be brought back
+  const ignoredNow = [...channels.keys()].filter(ch => ch !== STATUS_CHANNEL && ch !== STARRED_CHANNEL && isIgnored(ch)).sort();
+  if (ignoredNow.length > 0) {
+    const igSection = document.createElement('div');
+    igSection.className = 'tree-section';
+    const igLabel = document.createElement('div');
+    igLabel.className = 'tree-section-label' + (ignoredOpen ? '' : ' collapsed');
+    igLabel.textContent = `Ignored (${ignoredNow.length})`;
+    igLabel.addEventListener('click', () => {
+      ignoredOpen = !ignoredOpen;
+      try { localStorage.setItem('irc_ignored_open', ignoredOpen ? '1' : '0'); } catch { /* storage blocked */ }
+      renderTree();
+    });
+    igSection.appendChild(igLabel);
+    if (ignoredOpen) {
+      for (const ch of ignoredNow) {
+        const row = document.createElement('div');
+        row.className = 'ignored-row';
+        const name = document.createElement('span');
+        name.className = 'ign-name';
+        name.textContent = ch;
+        row.appendChild(name);
+        if (isIgnoredLocal(ch)) {
+          const b = document.createElement('button');
+          b.textContent = 'show';
+          b.title = 'Stop ignoring here';
+          b.addEventListener('click', () => toggleIgnoreLocal(ch));
+          row.appendChild(b);
+        }
+        if (isIgnoredRecorder(ch)) {
+          const kind = document.createElement('span');
+          kind.className = 'ign-kind';
+          kind.textContent = 'recorder';
+          row.appendChild(kind);
+          if (syncOn()) {
+            const b = document.createElement('button');
+            b.textContent = 'record';
+            b.title = 'Tell the recorder to record this talkgroup again';
+            b.addEventListener('click', () => setIgnoreRecorder(ch, false));
+            row.appendChild(b);
+          }
+        }
+        igSection.appendChild(row);
+      }
+    }
+    treeScroll.appendChild(igSection);
   }
 }
 
@@ -4227,6 +4343,7 @@ function upgradeLiveMessages(lc, entry) {
 
 /** Scanner: queue a recorded call for auto-play if its channel is scanned. */
 function enqueueRecorded(call, chanName, msgs) {
+  if (isIgnored(chanName)) return;
   if (call.encrypted || !call.audio || msgs.length === 0 || !msgs[0].path) return;
   scannerEnqueue(call.path, msgs[0].nick, chanName, call.emergency);
 }
@@ -4498,6 +4615,16 @@ function handleCommand(cmd) {
       break;
     }
 
+    case '/ignore':
+    case '/unignore': {
+      const off = c === '/unignore';
+      const rec2 = parts[1] === 'recorder' || parts[1] === 'rec';
+      if (!channelKey(activeChannel)) { addMsg(activeChannel, { ts: ts(), kind: 'notice', text: 'Join a talkgroup channel first' }); break; }
+      if (rec2) setIgnoreRecorder(activeChannel, !off);
+      else if (isIgnoredLocal(activeChannel) !== !off) toggleIgnoreLocal(activeChannel);
+      break;
+    }
+
     case '/sync':
       syncCommand(parts[1], parts[2]);
       break;
@@ -4596,6 +4723,7 @@ function handleCommand(cmd) {
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /listen off         — Stop live listening' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /volume N           — Live volume, 0-100' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /ops [patterns]     — View/set op nick patterns (comma-sep regex)' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /ignore [recorder]  — Hide this talkgroup here (or tell the recorder to ignore it); /unignore undoes' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /sync [on|off|status|push|pull] — Name sync with the recorder (needs control access)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /readall            — Mark all channels as read' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /reconnect          — Reconnect the transcript stream' });
@@ -5145,6 +5273,7 @@ function computeWanted() {
   if (own) s.add(own);
   if (listenMode === 'starred') for (const k of favorites) s.add(k);
   if (listenMode === 'scan') for (const k of scanChannels) s.add(k);
+  for (const k of ignoredLocal) s.delete(k);   // heard nowhere here
   return s;
 }
 
