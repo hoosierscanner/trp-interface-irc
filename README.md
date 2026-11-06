@@ -37,6 +37,9 @@ plugin.
   The channel bar has the same two buttons (lit when ignored), so you can see and flip it while the channel is open. Ignored channels fold into **Ignored (N)** at the bottom of the tree, where *show* / *record* bring them
   back. `/ignore`, `/ignore recorder`, `/unignore`, `/unignore recorder`. The tree and nicklist have
   always-visible scrollbars.
+- **Channel bar**: ☆ Star adds or removes the talkgroup from Starred without leaving the channel. With control access and
+  Sync on, ✎ beside the description edits it (the talkgroup file's Description column; it comes back as the
+  recorder's own edit, so other browsers see it too).
 - **Commands**: `/join`, `/part`, `/list`, `/who`, `/whois`, `/topic`, `/fav`, `/scan`,
   `/scanner`, `/listen`, `/volume`, `/sync`, `/ignore`, `/unignore`, `/ops`, `/readall`, `/clear`, `/reconnect`, `/api`, `/stats`, `/nerd`, `/help`.
 - The theme picker at the top switches between the themes (Ctrl+Shift+T cycles them; `?theme=matrix` in the address picks one, kept like a pick). Your own themes go in a `theme-local.js` beside `index.html`, which an upgrade never touches; [theme-local.example.js](https://github.com/trunk-reporter/trp-themes/blob/main/theme-local.example.js) is one to copy. The themes are [trp-themes](https://github.com/trunk-reporter/trp-themes) 1.0.0's, pared to the variables this page uses, with the default written into the page so it is styled before (or without) the engine; `node pare.mjs <this folder>` there refreshes them.

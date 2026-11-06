@@ -1149,7 +1149,9 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
       <button class="chan-edit-btn" id="chan-edit-btn" title="Edit channel name">&#9998;</button>
       <span class="chan-mode" id="chan-mode"></span>
       <span class="chan-topic" id="chan-topic">Connecting to the recorder...</span>
+      <button class="chan-edit-btn" id="chan-desc-btn" title="Edit this talkgroup's description on the recorder">&#9998;</button>
       <span class="chan-count" id="chan-count"></span>
+      <button class="chan-ign-btn" id="chan-star" style="display:none"></button>
       <button class="chan-ign-btn" id="chan-ign-local" style="display:none"></button>
       <button class="chan-ign-btn" id="chan-ign-rec" style="display:none"></button>
     </div>
@@ -1339,6 +1341,8 @@ function saveNameOverrides() {
 // With control access (the recorder sends `configPath` in `hello` only to control interfaces) a rename is
 // written to the recorder; the recorder's names win on the way back. Listen access: renames stay here.
 let hasControl = false;
+let descEditActive = false;
+const descPending = new Set();   // "short:tgid" whose description was sent and not yet confirmed
 const pendingRenames = new Set();   // "tg:short:tgid" / "unit:short:unit": renamed here, not yet on the recorder
 function syncPref() { try { return localStorage.getItem('irc_sync') !== '0'; } catch { return true; } }
 function syncOn() { return hasControl && syncPref(); }
@@ -1489,6 +1493,24 @@ function updateIgnoreBar() {
   const recBtn = document.getElementById('chan-ign-rec');
   if (!local || !recBtn) return;
   const isTg = Boolean(channelKey(activeChannel));
+  // Star, and the description (the recorder's, which can change under us): the same bar.
+  const star = document.getElementById('chan-star');
+  if (star) {
+    const fav = isTg && isFavorite(activeChannel);
+    star.style.display = isTg ? '' : 'none';
+    star.classList.toggle('on', fav);
+    star.textContent = fav ? '\u2605 Starred' : '\u2606 Star';
+    star.title = fav ? 'Take this talkgroup out of Starred' : 'Add this talkgroup to Starred';
+  }
+  const descBtn = document.getElementById('chan-desc-btn');
+  if (descBtn) descBtn.style.display = isTg && syncOn() && !descEditActive ? 'inline-block' : 'none';
+  const st = channels.get(activeChannel);
+  if (isTg && st && !descEditActive) {
+    const topic = st.description || st.tag || '';
+    const t1 = document.getElementById('chan-topic'), t2 = document.getElementById('titlebar-topic');
+    if (t1 && t1.textContent !== topic) t1.textContent = topic;
+    if (t2 && t2.textContent !== topic) t2.textContent = topic;
+  }
   const il = isTg && isIgnoredLocal(activeChannel), ir = isTg && isIgnoredRecorder(activeChannel);
   local.style.display = isTg ? '' : 'none';
   local.classList.toggle('on', il);
@@ -1516,6 +1538,7 @@ function setIgnoreRecorder(ch, on) {
   syncNotice(`${on ? 'Ignoring' : 'Un-ignoring'} ${ch} on the recorder...`);
   if (on) channelUnread.set(ch, 0);
 }
+document.getElementById('chan-star').addEventListener('click', () => { if (channelKey(activeChannel)) toggleFavorite(activeChannel); });
 document.getElementById('chan-ign-local').addEventListener('click', () => toggleIgnoreLocal(activeChannel));
 document.getElementById('chan-ign-rec').addEventListener('click', () => setIgnoreRecorder(activeChannel, !isIgnoredRecorder(activeChannel)));
 const channelLoading = new Set();       // prevent duplicate lazy-loads
@@ -1605,6 +1628,7 @@ function toggleFavorite(chanName) {
   saveFavorites();
   updateStarredChannel();
   renderTree();
+  updateIgnoreBar();
   liveWantedChanged();
 }
 
@@ -3186,6 +3210,62 @@ function cancelChannelEdit() {
   if (state && state.tgid) chanEditBtn.style.display = 'inline-block';
 }
 
+// The description (the topic line) is the recorder's: it is written to the talkgroup file and comes back
+// as the recorder's edit, so it needs control access and Sync on.
+
+function startDescEdit() {
+  const state = channels.get(activeChannel);
+  if (!state || !state.tgid || !syncOn() || descEditActive) return;
+  descEditActive = true;
+  const topicEl = document.getElementById('chan-topic');
+  const row = document.createElement('span');
+  row.className = 'chan-edit-row';
+  row.id = 'chan-desc-row';
+  row.style.flex = '1';
+  const input = document.createElement('input');
+  input.className = 'chan-edit-input';
+  input.style.flex = '1';
+  input.value = state.description || '';
+  input.placeholder = 'Description';
+  input.spellcheck = false;
+  const save = document.createElement('button');
+  save.className = 'chan-edit-save'; save.textContent = 'Save';
+  save.onclick = () => saveDescription(input.value.trim());
+  const cancel = document.createElement('button');
+  cancel.className = 'chan-edit-cancel'; cancel.textContent = 'Cancel';
+  cancel.onclick = cancelDescEdit;
+  input.onkeydown = (e) => { if (e.key === 'Enter') save.click(); if (e.key === 'Escape') cancelDescEdit(); };
+  row.append(input, save, cancel);
+  topicEl.style.display = 'none';
+  topicEl.parentNode.insertBefore(row, topicEl.nextSibling);
+  updateIgnoreBar();
+  input.focus();
+  input.select();
+}
+
+function cancelDescEdit() {
+  descEditActive = false;
+  const row = document.getElementById('chan-desc-row');
+  if (row) row.remove();
+  document.getElementById('chan-topic').style.display = '';
+  updateIgnoreBar();
+}
+
+function saveDescription(text) {
+  const state = channels.get(activeChannel);
+  cancelDescEdit();
+  if (!state || !state.tgid || text === (state.description || '')) return;
+  if (!rec.connected) { syncNotice('Offline: the description was not changed'); return; }
+  const key = tgKey(state.system_id, state.tgid);
+  descPending.add(key);
+  rec.setTalkgroup(state.system_id, state.tgid, { description: text });
+  setTimeout(() => {
+    if (descPending.delete(key)) syncNotice('The recorder has not confirmed the new description');
+  }, 5000);
+}
+
+document.getElementById('chan-desc-btn').addEventListener('click', startDescEdit);
+
 /** Give a talkgroup's channel the name `newTag` (the recorder's, or one typed here): renames the channel and refreshes the display. */
 function applyChannelName(state, newTag) {
   const key = tgKey(state.system_id, state.tgid);
@@ -3249,7 +3329,11 @@ function handleTalkgroupEdited(m) {
     if (chanName && channels.has(chanName)) applyChannelName(channels.get(chanName), edit.alphaTag);
     if (wasPending) syncNotice(edit.alphaTag === mine ? `Saved ${mine} on the recorder` : `The recorder's name for ${key} is ${edit.alphaTag || '(none)'}`);
   }
+  if (edit.description !== undefined && descPending.delete(tgKey(m.system, m.talkgroup))) {
+    syncNotice(`Saved the description on the recorder: ${edit.description || '(none)'}`);
+  }
   refreshTalkgroups(m.system);
+  updateIgnoreBar();
 }
 
 chanEditBtn.addEventListener('click', startChannelEdit);
@@ -3265,6 +3349,7 @@ function switchChannel(ch) {
 
   // Cancel any in-progress edit
   if (channelEditActive) cancelChannelEdit();
+  if (descEditActive) cancelDescEdit();
 
   activeChannel = ch;
   channelUnread.set(ch, 0);
