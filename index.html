@@ -1151,6 +1151,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
       <span class="chan-topic" id="chan-topic">Connecting to the recorder...</span>
       <button class="chan-edit-btn" id="chan-desc-btn" title="Edit this talkgroup's description on the recorder">&#9998;</button>
       <span class="chan-count" id="chan-count"></span>
+      <button class="chan-ign-btn" id="chan-em-clear" style="display:none" title="Clear the Emergency channel; it comes back with the next emergency call">&#10005; Clear emergencies</button>
       <button class="chan-ign-btn" id="chan-star" style="display:none"></button>
       <button class="chan-ign-btn" id="chan-ign-local" style="display:none"></button>
       <button class="chan-ign-btn" id="chan-ign-rec" style="display:none"></button>
@@ -1315,6 +1316,8 @@ const STATUS_CHANNEL = '*status';
 // Starred meta-channel: aggregates all favorited talkgroup activity
 const STARRED_CHANNEL = '\u2605 Starred';
 const EMERGENCY_CHANNEL = '\u26A0 Emergency';   // every emergency call, from any talkgroup, with its origin tagged
+// Clearing the Emergency channel removes it until the next emergency; history older than the clear is not loaded back.
+let emergencyClearedAt = (() => { try { return Number(localStorage.getItem('irc_emerg_cleared')) || 0; } catch { return 0; } })();
 function isMetaChannel(name) { return name === STATUS_CHANNEL || name === STARRED_CHANNEL || name === EMERGENCY_CHANNEL; }
 
 // The connection to the recorder serving this page (client.js reconnects by itself). The frequent
@@ -1502,6 +1505,8 @@ function updateIgnoreBar() {
     star.textContent = fav ? '\u2605 Starred' : '\u2606 Star';
     star.title = fav ? 'Take this talkgroup out of Starred' : 'Add this talkgroup to Starred';
   }
+  const emClear = document.getElementById('chan-em-clear');
+  if (emClear) emClear.style.display = activeChannel === EMERGENCY_CHANNEL ? '' : 'none';
   const descBtn = document.getElementById('chan-desc-btn');
   if (descBtn) descBtn.style.display = isTg && syncOn() && !descEditActive ? 'inline-block' : 'none';
   const st = channels.get(activeChannel);
@@ -1538,6 +1543,7 @@ function setIgnoreRecorder(ch, on) {
   syncNotice(`${on ? 'Ignoring' : 'Un-ignoring'} ${ch} on the recorder...`);
   if (on) channelUnread.set(ch, 0);
 }
+document.getElementById('chan-em-clear').addEventListener('click', clearEmergency);
 document.getElementById('chan-star').addEventListener('click', () => { if (channelKey(activeChannel)) toggleFavorite(activeChannel); });
 document.getElementById('chan-ign-local').addEventListener('click', () => toggleIgnoreLocal(activeChannel));
 document.getElementById('chan-ign-rec').addEventListener('click', () => setIgnoreRecorder(activeChannel, !isIgnoredRecorder(activeChannel)));
@@ -1686,6 +1692,21 @@ function ensureEmergencyChannel() {
   channels.set(EMERGENCY_CHANNEL, st);
   channelUnread.set(EMERGENCY_CHANNEL, 0);
   return st;
+}
+
+/** Dismiss the Emergency channel: it comes back with the next emergency call, not with the old ones. */
+function clearEmergency() {
+  if (!channels.has(EMERGENCY_CHANNEL)) return;
+  emergencyClearedAt = Date.now();
+  try { localStorage.setItem('irc_emerg_cleared', String(emergencyClearedAt)); } catch { /* storage blocked */ }
+  if (activeChannel === EMERGENCY_CHANNEL) switchChannel(STATUS_CHANNEL);
+  channels.delete(EMERGENCY_CHANNEL);
+  channelUnread.delete(EMERGENCY_CHANNEL);
+  channelLastMsgTs.delete(EMERGENCY_CHANNEL);
+  channelHasActivity.delete(EMERGENCY_CHANNEL);
+  channelLoadedCallIds.delete(EMERGENCY_CHANNEL);
+  channelLoadedEventIds.delete(EMERGENCY_CHANNEL);
+  renderTree();
 }
 
 /** Copy an emergency message into the Emergency channel (a locally ignored talkgroup's too; one the recorder ignores isn't recorded). */
@@ -4051,7 +4072,7 @@ function bootstrapRecentCalls() {
   for (const [chanName] of callsByChannel) {
     if (isIgnoredRecorder(chanName)) continue;
     for (const m of channels.get(chanName)?.messages || []) {
-      if (m.emergency && m.kind !== 'notice') emMsgs.push(Object.assign({}, m, { originChannel: chanName, _el: null }));
+      if (m.emergency && m.kind !== 'notice' && (m.date?.getTime() || 0) > emergencyClearedAt) emMsgs.push(Object.assign({}, m, { originChannel: chanName, _el: null }));
     }
   }
   if (emMsgs.length) {
@@ -4846,6 +4867,7 @@ function handleCommand(cmd) {
       break;
 
     case '/clear':
+      if (activeChannel === EMERGENCY_CHANNEL) { clearEmergency(); break; }
       if (channels.has(activeChannel)) {
         channels.get(activeChannel).messages = [];
         messagesEl.innerHTML = '';
@@ -4938,7 +4960,7 @@ function handleCommand(cmd) {
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /sync [on|off|status|push|pull] — Name sync with the recorder (needs control access)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /readall            — Mark all channels as read' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /reconnect          — Reconnect the transcript stream' });
-      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /clear              — Clear scrollback' });
+      addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /clear              — Clear scrollback (in Emergency: dismiss the channel)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /api [url|reset]    — Show or set the transcribe plugin\'s address' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '  /nerd               — Toggle hipster nerd cool mode (small text, low contrast)' });
       addMsg(activeChannel, { ts: ts(), kind: 'notice', text: '— End of /help —' });

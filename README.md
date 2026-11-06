@@ -24,7 +24,7 @@ plugin.
 - **Emergency**: the first emergency call (the recorder's emergency flag) makes a red **Emergency** channel under
   Unread, collecting every emergency call from any talkgroup, live and from the recorder's recent history,
   with the talkgroup tagged on each line, transcripts and audio as usual. It shows an emergency even on a
-  talkgroup you've ignored here (not one the recorder ignores, which isn't recorded). Its unread count is in the tab title.
+  talkgroup you've ignored here (not one the recorder ignores, which isn't recorded). Its unread count is in the tab title. **✕ Clear emergencies** in its bar (or `/clear` there) dismisses it until the next emergency call; the ones before the clear are not loaded back (remembered).
 - **Messages**: a recorded call is a line per keyup, the radio named; when its transcript comes
   the text replaces the placeholder, one line per segment. A call skipped or failed by the
   transcriber shows the reason, muted. A call on the air shows as the radio "typing". Scroll up
