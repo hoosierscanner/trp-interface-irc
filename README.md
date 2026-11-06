@@ -70,6 +70,11 @@ This interface asks for **control access**, so it can write names to the recorde
   access, renames are kept in this browser, as before.
 - `/sync status` counts renames kept only here; `/sync push` writes them to the recorder and clears them
   here; `/sync pull confirm` throws them away.
+- **Names that collide.** A channel is named from the talkgroup's name, with spaces and punctuation turned into hyphens, so
+  `29 NPD DISP` and `29-NPD-DISP` are the same channel name. When two different talkgroups end up with one, the page keeps
+  the first and adds the system's name (or, within one system, the talkgroup number) to the other, e.g.
+  `#29-NPD-DISP-MESA-System`. That is not a failed save: the recorder has the name you typed. To get a plain name on both,
+  give the talkgroups different names (for example a `-S` on the SAFE-T one).
 - **Control access lets this page change the recorder's names and config.** Anyone who can reach this
   interface's port (the recorder assigns it) can use it. Don't expose that port beyond people you trust.
 
