@@ -66,7 +66,7 @@ the scanner's auto-play is paused, so a call isn't heard twice; ▶ still plays 
 This interface asks for **control access**, so it can write names to the recorder and read them back:
 
 - **Channel rename (✎)** changes the talkgroup's name in the system's talkgroup file; **a radio's Save** edits
-  the system's unit names (`unitNames.csv`: one exact `unit,name` line, comments and other rows untouched).
+  the radio's own name on the recorder (`setUnitName`: its exact row, patterns untouched; needs recorder 0.3.1 or later, where unit names are stored rows rather than a CSV in the config).
   Edits made elsewhere (another browser, the Talkgroup & UID Editor) appear here live, and the recorder's
   name wins over one kept here.
 - The **SYNC** button in the title bar (or `/sync on|off`) turns writing on and off. Off, or with only listen

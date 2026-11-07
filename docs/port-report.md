@@ -198,11 +198,11 @@ Spec `docs/superpowers/specs/2026-11-05-tree-unread-name-sync-design.md`, plan
 
 - **Tree:** groups are open or closed (`irc_groups`), not shown by activity; counts on labels; ⊞ / ⊟.
 - **Unread:** section above the groups (`unread.js`), Read All, Alt+Up/Down, `(N) Radio IRC` tab title.
-- **Name sync:** `access: control`. Channel rename `rec.setTalkgroup`; radio rename edits `unitNames.csv`
-  via `rec.setConfig` (`names.js` `setUnitName`; writes serialized, one retry on a refused config).
-  `talkgroupEdited` / `config` bring other clients' names in, and win over names kept here. `/sync
+- **Name sync:** `access: control`. Channel rename `rec.setTalkgroup`; radio rename uses `rec.setUnitName`
+  (recorder 0.3.1+, where unit names are store rows; writes serialized, confirmed by `unitNameEdited`).
+  `talkgroupEdited` / `unitNameEdited` / `config` bring other clients' names in, and win over names kept here. `/sync
   on|off|status|push|pull confirm`, a SYNC button, kept in `irc_sync`.
-- **Tests:** `node --test 'test/*.test.mjs'` (names.js, unread.js: 17 tests). The page itself is checked
+- **Tests:** `node --test 'test/*.test.mjs'` (unread.js tests). The page itself is checked
   by syntax only here; see the deploy notes for what was and wasn't run against a recorder.
 - **Concerns:** control access lets anyone reaching the interface's port edit names and config; a
   system's `unitNames.mode` of `ota` or `none` can hide a written name; `hasControl` is inferred from

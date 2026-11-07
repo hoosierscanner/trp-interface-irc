@@ -1230,7 +1230,6 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 // The recorder's own client library, served by the recorder on this port.
 import { TrunkClient, LivePlayer, systemName } from "/api/client.js";
 import { unreadList, stepUnread, tabTitle } from "./unread.js";
-import { setUnitName, exactUnitName } from "./names.js";
 
 // ══════════════════════════════════════════════════════════════
 // TODO — Enhancement ideas
@@ -2176,55 +2175,40 @@ function changeNick(uk, oldNick, newNick) {
   }
 }
 
-// ── Radio names on the recorder: systems[i].unitNames.csv, edited through setConfig ──
+// ── Radio names on the recorder: its unit-name rows (`unitNames` / `unitNameEdited`, set with setUnitName) ──
 const recNameSeen = new Map();     // "short:unit" → the recorder's name when last looked at (to see it change)
 let unitWriteChain = Promise.resolve();
 
-/** The name on the recorder's exact unit-names line only (not an alias heard on the air, which arrives apart from the config). */
-function csvUnitName(sys, unit) {
-  const sc = findSystemConfig(rec.config || {}, sys);
-  return exactUnitName(sc?.unitNames?.csv, unit);
+/** The name on the recorder's exact row for this radio only (regex rows and aliases heard on the air don't count); '' when none. */
+function recExactUnitName(sys, unit) {
+  const id = String(unit).trim();
+  const row = (rec.unitNameRows?.[sys] || []).find(r => String(r.unit).trim() === id);
+  return row ? String(row.name).trim() : '';
 }
 
-function findSystemConfig(cfg, sys) {
-  return (cfg.systems || []).concat(cfg.conventional || []).find(x => x.shortName === sys);
-}
-
-/** One setConfig that applies `edits` ([{ unit, name }]) to system `sys`; resolves { ok } or { error }. */
-function sendUnitEdits(sys, edits) {
+/** One radio's name sent with setUnitName; resolves { ok } on the recorder's unitNameEdited, or { error }. */
+function sendUnitEdit(sys, unit, name) {
   return new Promise((resolve) => {
+    if (recExactUnitName(sys, unit) === String(name ?? '').trim()) { resolve({ ok: true }); return; }  // nothing to change: no echo comes
     let done = false;
-    const finish = (r) => { if (done) return; done = true; off(); clearTimeout(t); resolve(r); };
-    const off = rec.on('configSaved', (m) => finish(m.error ? { error: m.error, refused: true } : { ok: true }));
+    const offs = [];
+    const finish = (r) => { if (done) return; done = true; offs.forEach(f => f()); clearTimeout(t); resolve(r); };
+    offs.push(rec.on('unitNameEdited', (m) => { if (m.system === sys && Number(m.unit) === Number(unit)) finish({ ok: true }); }));
+    offs.push(rec.on('error', (m) => finish({ error: m.message || 'the recorder refused the name' })));
     const t = setTimeout(() => finish({ error: 'no answer from the recorder' }), 8000);
-    try {
-      rec.setConfig((cfg) => {
-        const sc = findSystemConfig(cfg, sys);
-        if (!sc) throw new Error(`no system ${sys} in the recorder's config`);
-        let csv = sc.unitNames?.csv ?? '';
-        for (const e of edits) {
-          const r = setUnitName(csv, e.unit, e.name);
-          if (r.error) throw new Error(`${e.unit}: ${r.error}`);
-          csv = r.csv;
-        }
-        sc.unitNames = { ...(sc.unitNames || {}), csv };
-      });
-    } catch (err) {
-      finish({ error: err.message });
-    }
+    rec.setUnitName(sys, Number(unit), name ?? '');
   });
 }
 
-/** Write radio names to the recorder, one at a time (the config is versioned); retries once if the config changed meanwhile. */
+/** Write radio names to the recorder, one at a time (so an error belongs to its edit); resolves { ok } or { error }. */
 function writeUnitNames(sys, edits) {
   const run = async () => {
     if (!rec.connected) return { error: 'offline' };
-    let r = await sendUnitEdits(sys, edits);
-    if (r.refused) {            // the config changed elsewhere: take the newer one and apply the same edits once more
-      await new Promise(res => setTimeout(res, 400));
-      r = await sendUnitEdits(sys, edits);
+    for (const e of edits) {
+      const r = await sendUnitEdit(sys, e.unit, e.name);
+      if (r.error) return { error: `${e.unit}: ${r.error}` };
     }
-    return r;
+    return { ok: true };
   };
   const next = unitWriteChain.then(run, run);
   unitWriteChain = next.catch(() => {});
@@ -2239,7 +2223,7 @@ function syncUnitRename(user, newTag, saveStatus, hadLocal) {
   // or the recorder's own line would be deleted.
   if (!newTag && hadLocal) { pendingRenames.delete(pendKey); return; }
   pendingRenames.add(pendKey);
-  recNameSeen.set(key, csvUnitName(user.systemId, user.unitId));
+  recNameSeen.set(key, recExactUnitName(user.systemId, user.unitId));
   if (!rec.connected) {
     saveStatus.textContent = 'pending';
     saveStatus.style.color = 'var(--irc-warning)';
@@ -2251,7 +2235,7 @@ function syncUnitRename(user, newTag, saveStatus, hadLocal) {
       pendingRenames.delete(pendKey);
       delete nameOverrides.unit[key];
       saveNameOverrides();
-      recNameSeen.set(key, csvUnitName(user.systemId, user.unitId));
+      recNameSeen.set(key, recExactUnitName(user.systemId, user.unitId));
       saveStatus.textContent = '\u2713 saved';
       saveStatus.style.color = 'var(--irc-success)';
       syncNotice(`Saved ${newTag || '(no name)'} for radio ${user.unitId} on the recorder`);
@@ -2263,13 +2247,13 @@ function syncUnitRename(user, newTag, saveStatus, hadLocal) {
   });
 }
 
-/** The recorder's config changed (anyone's edit): show new radio names, and let its names win over ones kept here. */
+/** The recorder's config or radio names changed (anyone's edit): show new radio names, and let its names win over ones kept here. */
 function onConfigChanged() {
   if (!bootstrapped) return;
   loadSystemNames();
   for (const key of Object.keys(nameOverrides.unit)) {
     const i = key.lastIndexOf(':');
-    const now = csvUnitName(key.slice(0, i), Number(key.slice(i + 1)));
+    const now = recExactUnitName(key.slice(0, i), Number(key.slice(i + 1)));
     if (recNameSeen.has(key) && recNameSeen.get(key) !== now) {
       delete nameOverrides.unit[key];
       pendingRenames.delete(`unit:${key}`);
@@ -5702,6 +5686,8 @@ rec.on('callsResult', answerQuery);
 rec.on('radioResult', answerQuery);
 rec.on('stats', showDecodeRate);
 rec.on('config', onConfigChanged);
+rec.on('unitNames', onConfigChanged);       // radio names arrive as rows, not in the config
+rec.on('unitNameEdited', onConfigChanged);
 rec.on('talkgroups', (m) => refreshTalkgroups(m.system));
 rec.on('talkgroupEdited', handleTalkgroupEdited);
 rec.on('error', (m) => serverMsg(`Recorder: ${m.message}`));
