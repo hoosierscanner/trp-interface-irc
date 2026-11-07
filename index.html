@@ -2507,8 +2507,14 @@ function resolveNick(systemId, unitId, alphaTag, source) {
   // A rename made here wins; with no name given, the recorder's (unit names, alias heard).
   const renamed = nameOverrides.unit[key];
   if (renamed) return toNick(renamed, unitId);
-  if (!alphaTag || !alphaTag.trim()) alphaTag = recUnitName(systemId, unitId);
-  const incoming = (source && SOURCE_PRIORITY[source] !== undefined) ? source : 'event';
+  let incoming = (source && SOURCE_PRIORITY[source] !== undefined) ? source : 'event';
+  // A name the recorder holds for this radio beats the one stamped on a call when it was recorded (that one can be old).
+  if (recExactUnitName(systemId, unitId)) {
+    alphaTag = recUnitName(systemId, unitId) || recExactUnitName(systemId, unitId);
+    incoming = 'manual';
+  } else if (!alphaTag || !alphaTag.trim()) {
+    alphaTag = recUnitName(systemId, unitId);
+  }
   if (alphaTag && alphaTag.trim()) {
     const nick = toNick(alphaTag, unitId);
     const cached = unitNickCache.get(key);
