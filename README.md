@@ -63,7 +63,8 @@ the scanner's auto-play is paused, so a call isn't heard twice; ▶ still plays 
 
 ## Name sync
 
-This interface asks for **control access**, so it can write names to the recorder and read them back:
+This interface asks only for **listen access**. To write names to the recorder and read them back, give it
+**Control** on the recorder's **Interfaces** page (the recorder asks you to confirm). With control access:
 
 - **Channel rename (✎)** changes the talkgroup's name in the system's talkgroup file; **a radio's Save** edits
   the radio's own name on the recorder (`setUnitName`: its exact row, patterns untouched; needs recorder 0.3.1 or later, where unit names are stored rows rather than a CSV in the config).
@@ -85,13 +86,13 @@ This interface asks for **control access**, so it can write names to the recorde
 
 On the recorder's **Interfaces** page, **Add a folder…** and pick this folder (or
 `trunk-pro interface add <folder>`). For one run, `trunk-pro --ui <folder>`. It is served on a
-port of its own with the recorder's API beside it, and asks for control access (for name
-sync; with only listen access it works read-only). It loads nothing from the internet; the themes name their fonts and fall back to the
+port of its own with the recorder's API beside it, with listen access (read-only). Give it Control on
+the Interfaces page for name sync, the description editor and ignoring on the recorder. It loads nothing from the internet; the themes name their fonts and fall back to the
 computer's own.
 
 ## Transcripts
 
-They come from the **transcribe plugin**'s HTTP API, at `http://<this page's host>:8767` unless you
+They come from the **transcribe plugin**'s HTTP API, at `http://<this page's host>:8767` (`https://` when the page itself is served over https) unless you
 say otherwise: `/api http://host:port` in the page (remembered; `/api reset` for the default), or
 `?transcribe=http://host:port` in the address (that visit only, never remembered). In the plugin's settings:
 

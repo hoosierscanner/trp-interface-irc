@@ -1246,12 +1246,13 @@ import { unreadList, stepUnread, tabTitle } from "./unread.js";
 
 // ══════════════════════════════════════════════════════════════
 // CONFIG — the transcribe plugin's HTTP API
-// Default: this page's own host, port 8767 (the plugin runs beside the recorder). /api <url> sets
+// Default: this page's own host, port 8767 (the plugin runs beside the recorder), over https when the
+// page is (a browser blocks http from an https page). /api <url> sets
 // it and it is remembered (localStorage); ?transcribe=http://host:port in the URL overrides it
 // for that page load only, and is never remembered (a crafted link can't re-point the page for good).
 // ══════════════════════════════════════════════════════════════
 const params = new URLSearchParams(location.search);
-const TRANSCRIBE_DEFAULT = `http://${location.hostname || '127.0.0.1'}:8767`;
+const TRANSCRIBE_DEFAULT = `${location.protocol === 'https:' ? 'https:' : 'http:'}//${location.hostname || '127.0.0.1'}:8767`;
 function cleanHttpBase(v) {
   try {
     const u = new URL(v);
@@ -1297,6 +1298,12 @@ function nickColor(nick) {
 const channels = new Map();
 const channelUnread = new Map();
 const channelLastMsgTs = new Map();   // channel -> when its latest unread message came (orders the Unread section)
+const channelReadAt = new Map();      // channel -> when it was last read (a message counted unread before that was read)
+/** A channel's unread count goes to 0: read now. */
+function markChannelRead(ch) {
+  channelUnread.set(ch, 0);
+  channelReadAt.set(ch, Date.now());
+}
 
 // Reverse lookups
 // system_id is a system's short name (the recorder's), everywhere in the page.
@@ -1364,11 +1371,11 @@ function setSync(on) {
   updateSyncUI();
 }
 function localRenameCount() { return Object.keys(nameOverrides.tg).length + Object.keys(nameOverrides.unit).length; }
-/** /sync [on|off|status|push|pull confirm] */
 /** A sync outcome the user should see: in the channel they are looking at (the status channel is easy to miss). */
 function syncNotice(text) {
   addMsg(activeChannel, { ts: ts(), kind: 'notice', text });
 }
+/** /sync [on|off|status|push|pull confirm] */
 function syncCommand(arg, parts2) {
   const say = (text) => addMsg(activeChannel, { ts: ts(), kind: 'notice', text });
   if (arg === 'on' || arg === 'off') {
@@ -1399,12 +1406,19 @@ async function syncPush(say) {
     bySys.get(sys).push({ key, unit: Number(unit), name });
   }
   if (!tgs.length && !bySys.size) { say('Nothing to push: no renames are kept only in this browser.'); return; }
+  let tgFailed = 0;
   for (const [key, name] of tgs) {
     const [sys, tg] = split(key);
     pendingRenames.add(`tg:${key}`);
-    rec.setTalkgroup(sys, Number(tg), { alphaTag: name });   // cleared when the recorder confirms (talkgroupEdited)
+    // Cleared here by handleTalkgroupEdited when the recorder confirms.
+    const r = await writeTalkgroup(sys, tg, { alphaTag: name });
+    if (r.error) { tgFailed++; say(`Could not save ${name} for ${key}: ${r.error} (kept here)`); }
   }
-  if (tgs.length) say(`Sent ${tgs.length} channel name(s); each clears here when the recorder confirms`);
+  if (tgs.length) say(`Saved ${tgs.length - tgFailed} of ${tgs.length} channel name(s) on the recorder`);
+  if (bySys.size && !unitNamesSupported()) {
+    say(`Radio names stay in this browser: ${UNIT_NAMES_UNSUPPORTED}`);
+    return;
+  }
   for (const [sys, list] of bySys) {
     const r = await writeUnitNames(sys, list.map(e => ({ unit: e.unit, name: e.name })));
     if (r.ok) {
@@ -1528,7 +1542,7 @@ function updateIgnoreBar() {
 function toggleIgnoreLocal(ch) {
   const k = channelKey(ch);
   if (!k) return;
-  if (ignoredLocal.has(k)) ignoredLocal.delete(k); else { ignoredLocal.add(k); channelUnread.set(ch, 0); }
+  if (ignoredLocal.has(k)) ignoredLocal.delete(k); else { ignoredLocal.add(k); markChannelRead(ch); }
   saveIgnoredLocal();
   liveWantedChanged();
   renderTree();
@@ -1538,9 +1552,11 @@ function setIgnoreRecorder(ch, on) {
   if (!st || !st.tgid) return;
   if (!syncOn()) { syncNotice('Ignoring on the recorder needs control access with Sync on.'); return; }
   if (on && !confirm(`Tell the recorder to ignore ${ch}? It stops recording this talkgroup for everyone until you un-ignore it.`)) return;
-  rec.setTalkgroup(st.system_id, st.tgid, { ignore: on });
   syncNotice(`${on ? 'Ignoring' : 'Un-ignoring'} ${ch} on the recorder...`);
-  if (on) channelUnread.set(ch, 0);
+  if (on) markChannelRead(ch);
+  writeTalkgroup(st.system_id, st.tgid, { ignore: on }).then((r) => {
+    if (r.error) syncNotice(`Could not ${on ? 'ignore' : 'un-ignore'} ${ch} on the recorder: ${r.error}`);
+  });
 }
 document.getElementById('chan-em-clear').addEventListener('click', clearEmergency);
 document.getElementById('chan-star').addEventListener('click', () => { if (channelKey(activeChannel)) toggleFavorite(activeChannel); });
@@ -1712,6 +1728,7 @@ function clearEmergency() {
 function forwardToEmergency(sourceChannel, msg) {
   if (!msg.emergency || msg.kind === 'topic' || msg.kind === 'mode') return;
   if (isMetaChannel(sourceChannel) || isIgnoredRecorder(sourceChannel)) return;
+  if (msg.date && msg.date.getTime() <= emergencyClearedAt) return;   // from before a clear (catch-up after a reconnect)
   ensureEmergencyChannel();
   const copy = Object.assign({}, msg, { originChannel: sourceChannel, _el: null });
   addMsg(EMERGENCY_CHANNEL, copy, true);
@@ -2159,6 +2176,14 @@ function changeNick(uk, oldNick, newNick) {
   for (const [chanName, ch] of channels) {
     if (ch.users.has(uk)) ch.users.get(uk).nick = newNick;
     for (const msg of ch.messages) {
+      if (msg.talkerUnits) {
+        // Several radios' label: made again from their nicks when this radio is one of them.
+        const sid = msg.talkerSys;
+        if (!msg.talkerUnits.some(u => unitKey(sid, u) === uk)) continue;
+        msg.nick = talkersLabel(sid, msg.talkerUnits);
+        if (chanName === activeChannel && msg._el) refreshMsgEl(msg);
+        continue;
+      }
       if (msg.nick !== oldNick) continue;
       msg.nick = newNick;
       if (chanName === activeChannel && msg._el) {
@@ -2177,42 +2202,84 @@ function changeNick(uk, oldNick, newNick) {
 
 // ── Radio names on the recorder: its unit-name rows (`unitNames` / `unitNameEdited`, set with setUnitName) ──
 const recNameSeen = new Map();     // "short:unit" → the recorder's name when last looked at (to see it change)
-let unitWriteChain = Promise.resolve();
+const exactNameIndex = new WeakMap();   // a system's unitNameRows array → Map(unit ID → name); client.js swaps the array on every change
 
 /** The name on the recorder's exact row for this radio only (regex rows and aliases heard on the air don't count); '' when none. */
 function recExactUnitName(sys, unit) {
-  const id = String(unit).trim();
-  const row = (rec.unitNameRows?.[sys] || []).find(r => String(r.unit).trim() === id);
-  return row ? String(row.name).trim() : '';
+  const rows = rec.unitNameRows?.[sys];
+  if (!rows || !rows.length) return '';
+  let index = exactNameIndex.get(rows);
+  if (!index) {
+    index = new Map();
+    for (const r of rows) {
+      const id = String(r.unit).trim();
+      if (!index.has(id)) index.set(id, String(r.name).trim());   // the first row wins, as a lookup would
+    }
+    exactNameIndex.set(rows, index);
+  }
+  return index.get(String(unit).trim()) || '';
+}
+
+/** Whether the recorder can take radio names (setUnitName / unitNameRows: recorder 0.3.1 and later). */
+function unitNamesSupported() {
+  return typeof rec.setUnitName === 'function' && rec.unitNameRows != null;
+}
+const UNIT_NAMES_UNSUPPORTED = 'this recorder is older than 0.3.1 and cannot take radio names';
+
+// ── Writes to the recorder, one at a time ──
+// The recorder's `error` message doesn't say which command it answers, so only one write waits for its
+// answer at a time: an error that comes meanwhile belongs to it.
+let recWriteChain = Promise.resolve();
+
+/** Send one write and wait for its confirmation (`isAnswer(message)` on `answerType`) or an error; resolves { ok } or { error }.
+ *  `send` returning false means there was nothing to send (no answer will come): { ok } at once. */
+function recWrite(send, answerType, isAnswer, refused) {
+  const run = () => new Promise((resolve) => {
+    if (!rec.connected) { resolve({ error: 'offline' }); return; }
+    let done = false;
+    const offs = [];
+    let t = null;
+    const finish = (r) => { if (done) return; done = true; offs.forEach(f => f()); clearTimeout(t); resolve(r); };
+    offs.push(rec.on(answerType, (m) => { if (isAnswer(m)) finish({ ok: true }); }));
+    offs.push(rec.on('error', (m) => finish({ error: m.message || refused })));
+    t = setTimeout(() => finish({ error: 'no answer from the recorder' }), 8000);
+    try { if (send() === false) finish({ ok: true }); } catch (err) { finish({ error: err.message || String(err) }); }
+  });
+  const next = recWriteChain.then(run, run);
+  recWriteChain = next.catch(() => {});
+  return next;
+}
+
+/** A talkgroup's cells written with setTalkgroup; resolves on the recorder's talkgroupEdited for it. */
+function writeTalkgroup(sys, tgid, fields) {
+  return recWrite(
+    () => rec.setTalkgroup(sys, Number(tgid), fields),
+    'talkgroupEdited', (m) => m.system === sys && Number(m.talkgroup) === Number(tgid),
+    'the recorder refused the talkgroup edit');
 }
 
 /** One radio's name sent with setUnitName; resolves { ok } on the recorder's unitNameEdited, or { error }. */
 function sendUnitEdit(sys, unit, name) {
-  return new Promise((resolve) => {
-    if (recExactUnitName(sys, unit) === String(name ?? '').trim()) { resolve({ ok: true }); return; }  // nothing to change: no echo comes
-    let done = false;
-    const offs = [];
-    const finish = (r) => { if (done) return; done = true; offs.forEach(f => f()); clearTimeout(t); resolve(r); };
-    offs.push(rec.on('unitNameEdited', (m) => { if (m.system === sys && Number(m.unit) === Number(unit)) finish({ ok: true }); }));
-    offs.push(rec.on('error', (m) => finish({ error: m.message || 'the recorder refused the name' })));
-    const t = setTimeout(() => finish({ error: 'no answer from the recorder' }), 8000);
-    rec.setUnitName(sys, Number(unit), name ?? '');
-  });
+  if (!unitNamesSupported()) return Promise.resolve({ error: UNIT_NAMES_UNSUPPORTED });
+  return recWrite(
+    () => {
+      // Nothing to change: not sent. Checked when its turn comes, after the writes before it.
+      if (recExactUnitName(sys, unit) === String(name ?? '').trim()) return false;
+      rec.setUnitName(sys, Number(unit), name ?? '');
+    },
+    'unitNameEdited', (m) => m.system === sys && Number(m.unit) === Number(unit),
+    'the recorder refused the name');
 }
 
-/** Write radio names to the recorder, one at a time (so an error belongs to its edit); resolves { ok } or { error }. */
-function writeUnitNames(sys, edits) {
-  const run = async () => {
-    if (!rec.connected) return { error: 'offline' };
-    for (const e of edits) {
-      const r = await sendUnitEdit(sys, e.unit, e.name);
-      if (r.error) return { error: `${e.unit}: ${r.error}` };
-    }
-    return { ok: true };
-  };
-  const next = unitWriteChain.then(run, run);
-  unitWriteChain = next.catch(() => {});
-  return next;
+/** Write radio names to the recorder, one at a time; resolves { ok } or { error } (the first that failed). */
+async function writeUnitNames(sys, edits) {
+  if (!rec.connected) return { error: 'offline' };
+  if (!unitNamesSupported()) return { error: UNIT_NAMES_UNSUPPORTED };
+  for (const e of edits) {
+    const r = await sendUnitEdit(sys, e.unit, e.name);
+    if (r.error) return { error: `${e.unit}: ${r.error}` };
+  }
+  return { ok: true };
 }
 
 /** After a radio rename saved here with Sync on: write it, and report. */
@@ -2222,6 +2289,12 @@ function syncUnitRename(user, newTag, saveStatus, hadLocal) {
   // Clearing a name that was only kept here means "the recorder's name again": nothing to send,
   // or the recorder's own line would be deleted.
   if (!newTag && hadLocal) { pendingRenames.delete(pendKey); return; }
+  if (!unitNamesSupported()) {
+    saveStatus.textContent = 'kept here';
+    saveStatus.style.color = 'var(--irc-warning)';
+    syncNotice(`Radio names stay in this browser: ${UNIT_NAMES_UNSUPPORTED}`);
+    return;
+  }
   pendingRenames.add(pendKey);
   recNameSeen.set(key, recExactUnitName(user.systemId, user.unitId));
   if (!rec.connected) {
@@ -2230,7 +2303,7 @@ function syncUnitRename(user, newTag, saveStatus, hadLocal) {
     syncNotice(`Offline: ${newTag || key} is kept here until the recorder is back (/sync push)`);
     return;
   }
-  writeUnitNames(user.systemId, [{ unit: user.unitId, name: newTag }]).then((r) => {
+  writeUnitNames(user.systemId, [{ unit: user.unitId, name: newTag }]).catch((err) => ({ error: err.message || String(err) })).then((r) => {
     if (r.ok) {
       pendingRenames.delete(pendKey);
       delete nameOverrides.unit[key];
@@ -2247,13 +2320,25 @@ function syncUnitRename(user, newTag, saveStatus, hadLocal) {
   });
 }
 
+/** At startup: the recorder's names for the radios renamed here, as they are now, so its next change to one is seen. */
+function seedRecNameSeen() {
+  for (const key of Object.keys(nameOverrides.unit)) {
+    const i = key.lastIndexOf(':');
+    const sys = key.slice(0, i);
+    if (recNameSeen.has(key) || rec.unitNameRows?.[sys] === undefined) continue;
+    recNameSeen.set(key, recExactUnitName(sys, Number(key.slice(i + 1))));
+  }
+}
+
 /** The recorder's config or radio names changed (anyone's edit): show new radio names, and let its names win over ones kept here. */
 function onConfigChanged() {
   if (!bootstrapped) return;
   loadSystemNames();
   for (const key of Object.keys(nameOverrides.unit)) {
     const i = key.lastIndexOf(':');
-    const now = recExactUnitName(key.slice(0, i), Number(key.slice(i + 1)));
+    const sys = key.slice(0, i);
+    if (rec.unitNameRows?.[sys] === undefined) continue;   // its names haven't come yet: nothing to compare with
+    const now = recExactUnitName(sys, Number(key.slice(i + 1)));
     if (recNameSeen.has(key) && recNameSeen.get(key) !== now) {
       delete nameOverrides.unit[key];
       pendingRenames.delete(`unit:${key}`);
@@ -2261,17 +2346,30 @@ function onConfigChanged() {
     }
     recNameSeen.set(key, now);
   }
+  // Radios shown now: a nick changes only when the recorder's name for that radio did (not on every config
+  // change), and a name stamped on a call or heard on the air isn't overruled by a weaker one.
   const seen = new Set();
   for (const ch of channels.values()) {
     for (const [uk, user] of ch.users) {
       if (seen.has(uk)) continue;
       seen.add(uk);
       if (nameOverrides.unit[uk]) continue;
-      const name = recUnitName(user.systemId, user.unitId);
-      if (!name || !name.trim() || toNick(name, user.unitId) === user.nick) continue;
-      const oldNick = user.nick;
-      unitNickCache.delete(uk);
-      changeNick(uk, oldNick, resolveNick(user.systemId, user.unitId, name, 'manual'));
+      const exact = recExactUnitName(user.systemId, user.unitId);
+      const cached = unitNickCache.get(uk);
+      let fresh = null;
+      if (cached?.fromRec !== undefined ? cached.fromRec !== exact : Boolean(exact)) {
+        // Its own row on the recorder came, changed or was taken out: the recorder's name now (or what's left).
+        unitNickCache.delete(uk);
+        fresh = resolveNick(user.systemId, user.unitId, '', 'event');
+      } else if (!exact && (!cached || SOURCE_PRIORITY[cached.source] <= SOURCE_PRIORITY.event)) {
+        // No row of its own and nothing stronger: a pattern or the alias heard may have changed.
+        const name = recUnitName(user.systemId, user.unitId);
+        if (name && name.trim() && toNick(name, user.unitId) !== user.nick) {
+          unitNickCache.delete(uk);
+          fresh = resolveNick(user.systemId, user.unitId, name, 'event');
+        }
+      }
+      if (fresh && fresh !== user.nick) changeNick(uk, user.nick, fresh);
     }
   }
   renderNicklist();
@@ -2305,7 +2403,7 @@ function saveUnitTag(user, newTag) {
       const uk = unitKey(user.systemId, user.unitId);
       const oldNick = user.nick;
       unitNickCache.delete(uk);
-      const newNick = resolveNick(user.systemId, user.unitId, newTag, 'manual');
+      const newNick = resolveNick(user.systemId, user.unitId, newTag, newTag ? 'manual' : 'event');
       changeNick(uk, oldNick, newNick);
 
       user.nick = newNick;
@@ -2434,6 +2532,11 @@ function renameChannel(oldName, newName) {
   const key = tgKey(state.system_id, state.tgid);
   tgidToChannel.set(key, newName);
   if (activeChannel === oldName) activeChannel = newName;
+  if (channelReadAt.has(oldName)) { channelReadAt.set(newName, channelReadAt.get(oldName)); channelReadAt.delete(oldName); }
+  // Calls on the air, or waiting for their recording, go on in the channel under its new name
+  // (a rename can come from another browser at any time).
+  for (const lc of liveCalls.values()) if (lc.chanName === oldName) lc.chanName = newName;
+  for (const lc of awaitingPath) if (lc.chanName === oldName) lc.chanName = newName;
 }
 
 /** Build a disambiguated channel suffix for a talkgroup */
@@ -2509,9 +2612,15 @@ function resolveNick(systemId, unitId, alphaTag, source) {
   if (renamed) return toNick(renamed, unitId);
   let incoming = (source && SOURCE_PRIORITY[source] !== undefined) ? source : 'event';
   // A name the recorder holds for this radio beats the one stamped on a call when it was recorded (that one can be old).
-  if (recExactUnitName(systemId, unitId)) {
-    alphaTag = recUnitName(systemId, unitId) || recExactUnitName(systemId, unitId);
+  const exact = recExactUnitName(systemId, unitId);
+  // A nick taken from the recorder's row (fromRec) is stale once that row changed or went.
+  const stale = unitNickCache.get(key);
+  if (stale && stale.fromRec !== undefined && stale.fromRec !== exact) unitNickCache.delete(key);
+  let fromRec;
+  if (exact) {
+    alphaTag = recUnitName(systemId, unitId) || exact;
     incoming = 'manual';
+    fromRec = exact;
   } else if (!alphaTag || !alphaTag.trim()) {
     alphaTag = recUnitName(systemId, unitId);
   }
@@ -2519,7 +2628,7 @@ function resolveNick(systemId, unitId, alphaTag, source) {
     const nick = toNick(alphaTag, unitId);
     const cached = unitNickCache.get(key);
     if (!cached || SOURCE_PRIORITY[incoming] >= SOURCE_PRIORITY[cached.source]) {
-      unitNickCache.set(key, { nick, source: incoming });
+      unitNickCache.set(key, { nick, source: incoming, fromRec });
       return nick;
     }
     return cached.nick;
@@ -2538,8 +2647,8 @@ function resolveNick(systemId, unitId, alphaTag, source) {
 function addMsg(channel, msg, skipForward) {
   const state = channels.get(channel);
   if (!state) return;
-  // Ignored talkgroups show nothing (notices still do)
-  if (msg.kind !== 'notice') {
+  // Ignored talkgroups show nothing (notices still do, but not an emergency's: that goes to Emergency)
+  if (msg.kind !== 'notice' || msg.emergency) {
     const hidden = isIgnored(channel) || (channel !== EMERGENCY_CHANNEL && msg.originChannel && isIgnored(msg.originChannel));
     if (hidden) {
       if (channel !== EMERGENCY_CHANNEL && !skipForward) forwardToEmergency(channel, msg);   // an emergency still shows
@@ -2568,6 +2677,7 @@ function addMsg(channel, msg, skipForward) {
   } else {
     channelUnread.set(channel, (channelUnread.get(channel) || 0) + 1);
     channelLastMsgTs.set(channel, Date.now());
+    msg._unreadAt = Date.now();
     renderTree();
   }
 
@@ -2605,7 +2715,9 @@ function buildMsgEl(m) {
     if (m.originChannel) {
       nickHtml += `<span class="origin-tag" data-channel="${esc(m.originChannel)}">${esc(m.originChannel)}</span>`;
     }
-    nickHtml += `<span class="nick" style="color:${color}" data-nick="${esc(m.nick || '')}">${esc(m.nick || '???')}</span>`;
+    // Several radios' label (talkerUnits): no data-nick, so no tooltip or radio card for a radio that doesn't exist.
+    const nickData = m.talkerUnits ? '' : ` data-nick="${esc(m.nick || '')}"`;
+    nickHtml += `<span class="nick" style="color:${color}"${nickData}>${esc(m.nick || '???')}</span>`;
 
     // Voice message with audio link (and optional transcription text)
     if (m.callId) {
@@ -3269,10 +3381,9 @@ function saveDescription(text) {
   if (!rec.connected) { syncNotice('Offline: the description was not changed'); return; }
   const key = tgKey(state.system_id, state.tgid);
   descPending.add(key);
-  rec.setTalkgroup(state.system_id, state.tgid, { description: text });
-  setTimeout(() => {
-    if (descPending.delete(key)) syncNotice('The recorder has not confirmed the new description');
-  }, 5000);
+  writeTalkgroup(state.system_id, state.tgid, { description: text }).then((r) => {
+    if (r.error && descPending.delete(key)) syncNotice(`The description was not changed: ${r.error}`);
+  });
 }
 
 document.getElementById('chan-desc-btn').addEventListener('click', startDescEdit);
@@ -3321,10 +3432,9 @@ function saveChannelTag(newTag) {
     return;
   }
   pendingRenames.add(pendKey);
-  rec.setTalkgroup(state.system_id, state.tgid, { alphaTag: newTag });
-  setTimeout(() => {
-    if (pendingRenames.has(pendKey)) syncNotice(`The recorder has not confirmed ${newTag} yet; it is kept here (/sync status)`);
-  }, 5000);
+  writeTalkgroup(state.system_id, state.tgid, { alphaTag: newTag }).then((r) => {
+    if (r.error && pendingRenames.has(pendKey)) syncNotice(`Could not save ${newTag} on the recorder (${r.error}); it is kept here (/sync status)`);
+  });
 }
 
 /** The recorder changed a talkgroup's cells (ours, or someone else's): its name wins over one kept here. */
@@ -3363,7 +3473,7 @@ function switchChannel(ch) {
   if (descEditActive) cancelDescEdit();
 
   activeChannel = ch;
-  channelUnread.set(ch, 0);
+  markChannelRead(ch);
 
   const state = channels.get(ch);
   const displayName = ch;
@@ -4050,8 +4160,8 @@ function bootstrapRecentCalls() {
   // Set unread badges and activity flags for channels with backfill
   for (const [chanName, count] of backfillCounts) {
     channelHasActivity.add(chanName);
-    // Don't set unread for the currently active channel
-    if (chanName !== activeChannel) {
+    // Don't set unread for the currently active channel, or for one that's ignored (nothing counts there)
+    if (chanName !== activeChannel && !isIgnored(chanName)) {
       channelUnread.set(chanName, count);
       if (!channelLastMsgTs.has(chanName)) channelLastMsgTs.set(chanName, 0);
     }
@@ -4240,10 +4350,12 @@ function applyTranscriptionToChannel(chanName, callId, t) {
       const unit = s.unit != null ? s.unit : (several ? null : lastTalker);
       const nick = several ? talkersLabel(sid, distinctTalkers)
         : (unit != null ? resolveNick(sid, unit, '') : 'unknown');
+      // A label for several radios is no one's nick: kept apart so nick actions and renames don't take it for one.
+      const talkerUnits = several ? distinctTalkers : undefined;
       const date = new Date(startMs + (s.start || 0) * 1000);
       const len = Math.max(0, (s.end || 0) - (s.start || 0));
       return Object.assign({}, base, {
-        ts: ts(date), date, nick, src: unit,
+        ts: ts(date), date, nick, src: unit, talkerUnits, talkerSys: talkerUnits ? sid : undefined,
         pos: s.start || 0, txDuration: len,
         duration: len ? fmtDuration(len) : base.duration,
         text: fmtTranscript(s.text), textMuted: false, _el: null,
@@ -4406,15 +4518,24 @@ function syncCalls() {
 
 /** Take out the placeholder lines of a live call that was never recorded (no path came for them). */
 function dropUnsavedCall(lc) {
+  let changed = false;
   for (const name of [lc.chanName, STARRED_CHANNEL, EMERGENCY_CHANNEL]) {
     const ch = channels.get(name);
     if (!ch) continue;
+    const readAt = channelReadAt.get(name) || 0;
+    let unread = 0;
     ch.messages = ch.messages.filter((m) => {
       if (m.callId !== lc.key || m.path) return true;
       if (m._el) m._el.remove();
+      if (m._unreadAt && m._unreadAt > readAt) unread++;   // counted unread and not read since
       return false;
     });
+    if (unread) {
+      channelUnread.set(name, Math.max(0, (channelUnread.get(name) || 0) - unread));
+      changed = true;
+    }
   }
+  if (changed) renderTree();
 }
 
 /** A call came on the air: the typing indicator, an emergency notice, an encrypted call's line. */
@@ -4545,20 +4666,19 @@ function upgradeLiveMessages(lc, entry) {
   const call = entryToCall(entry);
   const newMsgs = callsToMessages([call], chanName, call.system_id);
   const old = ch.messages.filter(m => m.callId === lc.key);
-  if (old.length) replaceCallMessages(chanName, old, newMsgs);
-  else for (const m of newMsgs) addMsg(chanName, m);
-  const st = channels.get(STARRED_CHANNEL);
-  if (st && old.length) {
-    const oldStarred = st.messages.filter(m => m.callId === lc.key);
-    if (oldStarred.length) {
-      replaceCallMessages(STARRED_CHANNEL, oldStarred, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
-    }
-  }
+  // Emergency holds the placeholder lines even when its channel doesn't (a talkgroup ignored here).
   const em = channels.get(EMERGENCY_CHANNEL);
-  if (em && old.length) {
-    const oldEm = em.messages.filter(m => m.callId === lc.key);
-    if (oldEm.length) replaceCallMessages(EMERGENCY_CHANNEL, oldEm, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
+  const oldEm = em ? em.messages.filter(m => m.callId === lc.key) : [];
+  const st = channels.get(STARRED_CHANNEL);
+  const oldStarred = st ? st.messages.filter(m => m.callId === lc.key) : [];
+  if (old.length) replaceCallMessages(chanName, old, newMsgs);
+  // Not in its channel (cleared, or ignored here): added there, but where its placeholders were forwarded
+  // they are replaced below, not added again.
+  else for (const m of newMsgs) addMsg(chanName, m, oldEm.length > 0 || oldStarred.length > 0);
+  if (oldStarred.length) {
+    replaceCallMessages(STARRED_CHANNEL, oldStarred, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
   }
+  if (oldEm.length) replaceCallMessages(EMERGENCY_CHANNEL, oldEm, newMsgs.map(m => Object.assign({}, m, { originChannel: chanName, _el: null })));
   drainPendingTranscriptions([call.call_id]);
   enqueueRecorded(call, chanName, newMsgs);
 }
@@ -5272,9 +5392,7 @@ audioEl.addEventListener('loadedmetadata', () => {
 // ══════════════════════════════════════════════════════════════
 
 function markAllRead() {
-  for (const key of channelUnread.keys()) {
-    channelUnread.set(key, 0);
-  }
+  for (const key of channelUnread.keys()) markChannelRead(key);
   renderTree();
 }
 
@@ -5427,6 +5545,7 @@ rec.on('hello', (m) => {
     bootstrapChannels();
     bootstrapRecentCalls();
     bootstrapped = true;
+    seedRecNameSeen();
     bootstrapUnits();
     connectTranscripts();
   } else {

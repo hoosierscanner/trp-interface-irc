@@ -198,7 +198,7 @@ Spec `docs/superpowers/specs/2026-11-05-tree-unread-name-sync-design.md`, plan
 
 - **Tree:** groups are open or closed (`irc_groups`), not shown by activity; counts on labels; ⊞ / ⊟.
 - **Unread:** section above the groups (`unread.js`), Read All, Alt+Up/Down, `(N) Radio IRC` tab title.
-- **Name sync:** `access: control`. Channel rename `rec.setTalkgroup`; radio rename uses `rec.setUnitName`
+- **Name sync:** `access: listen` (control granted on the Interfaces page). Channel rename `rec.setTalkgroup`; radio rename uses `rec.setUnitName`
   (recorder 0.3.1+, where unit names are store rows; writes serialized, confirmed by `unitNameEdited`).
   `talkgroupEdited` / `unitNameEdited` / `config` bring other clients' names in, and win over names kept here. `/sync
   on|off|status|push|pull confirm`, a SYNC button, kept in `irc_sync`.
