@@ -1032,9 +1032,6 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   /* Status bar */
   .statusbar { font-size: 11px; padding: 0 6px; }
 
-  /* Nick width smaller on mobile */
-  .nick { max-width: 80px !important; }
-
   /* Larger touch targets for audio play buttons */
   .voice-play {
     min-width: 44px;
@@ -1087,11 +1084,149 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 @media (min-width: 769px) {
   .mobile-hamburger { display: none; }
   .mobile-users-btn { display: none; }
+  .mobile-menu-btn { display: none; }
   .drawer-backdrop { display: none !important; }
 }
 
 @media (max-width: 768px) {
   .panel-resizer { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════ */
+/* PHONE LAYOUT, part 2 — one top bar, bottom sheets, finger-sized targets */
+/* ══════════════════════════════════════════════════════════════ */
+
+.tb-dot { display: none; }
+.sheet, .sheet-backdrop { display: none; }
+
+@media (max-width: 768px) {
+  /* The visible height, so the command box is not under the browser's toolbar */
+  html, body { height: 100dvh; }
+  .trp-header { display: none !important; }
+  .statusbar { display: none; }
+
+  /* One top bar: ☰ · dot · channel ▾ · LISTEN · 👥 · ⋯ */
+  .titlebar { height: 48px; padding: 0 4px; gap: 2px; }
+  .titlebar .server, .titlebar .tb-dash, .titlebar #titlebar-edit-btn, .titlebar #sync-btn { display: none !important; }
+  .mobile-hamburger { width: 44px; height: 44px; flex: 0 0 44px; }
+  .tb-dot { display: block; width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; margin-right: 6px; background: var(--danger); }
+  .tb-dot.connected { background: var(--success); }
+  .tb-dot.connecting { background: var(--warning); animation: blink 1s infinite; }
+  #titlebar-chan {
+    flex: 1 1 0; min-width: 0; height: 44px; line-height: 44px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 15px; font-weight: 600; color: var(--text); cursor: pointer;
+  }
+  /* Before the name, so the ellipsis on a long name cannot hide it */
+  #titlebar-chan::before { content: '▾ '; color: var(--irc-info); font-weight: 400; }
+  .listen-btn { height: 40px; padding: 0 10px; font-size: 13px; }
+  .listen-ctl { margin: 0 2px; }
+  /* Mode and volume live in the ⋯ sheet on a phone (moved there by placeListenControls) */
+  .sheet .listen-mode { height: 44px; font-size: 16px; flex: 1; padding: 0 8px; }
+  .sheet .listen-vol { width: auto; flex: 1; height: 44px; }
+
+  /* Channel bar: topic and user count only; the actions are in the channel sheet */
+  .channel-bar { height: 34px; padding: 0 12px; gap: 8px; }
+  .channel-bar .chan-name, .channel-bar .chan-edit-btn,
+  .channel-bar .chan-ign-btn:not(#chan-em-clear) { display: none !important; }
+  .channel-bar .chan-topic { font-size: 13px; }
+  .channel-bar #chan-em-clear { height: 30px; }
+  /* Renaming: the edit row takes the whole bar */
+  .channel-bar:has(.chan-edit-row) { height: 56px; padding: 0 8px; }
+  .channel-bar:has(.chan-edit-row) > :not(.chan-edit-row) { display: none !important; }
+  .chan-edit-row { flex: 1; min-width: 0; gap: 8px; }
+  .chan-edit-input { flex: 1; min-width: 0; width: auto; height: 44px; font-size: 16px; padding: 0 10px; }
+  .chan-edit-save, .chan-edit-cancel { height: 44px; padding: 0 12px; font-size: 14px; flex-shrink: 0; }
+
+  /* Channel drawer: tall rows, name + unread + star */
+  .channel-tree { width: min(86vw, 340px); }
+  .tree-header-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tree-header-row { gap: 8px; min-height: 48px; }
+  .read-all-btn { min-height: 36px; padding: 0 10px; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
+  .tree-search-input { font-size: 16px; height: 40px; }
+  .tree-btn { min-width: 40px; min-height: 40px; font-size: 16px; }
+  .tree-section-label { min-height: 40px; display: flex; align-items: center; font-size: 13px; }
+  .channel-item { min-height: 42px; font-size: 15px; padding: 0 4px 0 16px; gap: 6px; }
+  .channel-item .unread { font-size: 12px; padding: 1px 6px; }
+  .channel-item .scan-icon, .channel-item .ign-icon { display: none; }
+  .channel-item .fav-star {
+    opacity: 1; font-size: 18px; min-width: 40px; min-height: 40px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .ignored-row { min-height: 42px; font-size: 14px; }
+  .ignored-row button { min-height: 34px; padding: 0 10px; font-size: 13px; }
+  .tree-status { padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+
+  /* Radio list drawer */
+  .nicklist { width: min(80vw, 300px); }
+  .nick-item { min-height: 40px; display: flex; align-items: center; font-size: 15px; }
+
+  /* Messages: the radio's whole name, then what it said */
+  .msg .nick { max-width: calc(100% - 64px); text-align: left; padding-right: 0; min-width: 0; font-size: 14px; }
+  .msg.call-group-first::before, .msg.call-group-mid::before, .msg.call-group-last::before { left: 3px; }
+  .msg.call-group-mid .ts, .msg.call-group-last .ts { visibility: visible; }
+  /* A finger-sized hit area without making every line taller */
+  .voice-play { min-width: 0; min-height: 0; display: inline; position: relative; padding: 0 6px; font-size: 18px; }
+  .voice-play::after { content: ''; position: absolute; inset: -12px -12px; }
+
+  /* Player */
+  .player-inner { gap: 6px; padding: 4px 8px; }
+  .player-btn, .player-btn.player-skip, .player-btn.player-close { width: 42px; height: 42px; font-size: 16px; }
+  .player-info { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+  .player-nick { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .player-chan { display: none; }
+  .player-time { white-space: nowrap; }
+  .player-progress { flex: 0 1 60px; min-width: 24px; height: 6px; }
+
+  /* Command box: 16px so iOS does not zoom the page on focus */
+  .input-area { padding-bottom: env(safe-area-inset-bottom); }
+  .input-prompt { display: none; }
+  .input-field { font-size: 16px; min-height: 44px; }
+
+  /* Radio dialog: full screen, big name field */
+  .unit-modal-box { width: 100%; max-width: none; height: 100dvh; max-height: none; border: 0; border-radius: 0; }
+  .unit-modal-close { top: 4px; right: 4px; width: 44px; height: 44px; font-size: 28px; }
+  .unit-modal-header { padding: 16px 52px 12px 16px; }
+  .unit-modal-tag-row { padding: 0 16px 12px; }
+  .unit-modal-tag-input { font-size: 16px; height: 48px; padding: 0 12px; min-width: 0; }
+  .unit-modal-save { height: 48px; padding: 0 18px; font-size: 15px; }
+  .unit-modal-meta { padding: 0 16px 12px; font-size: 13px; }
+  .unit-modal-meta-value { font-size: 13px; }
+
+  /* Bottom sheets */
+  .sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 1100; }
+  .sheet-backdrop.visible { display: block; }
+  .sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 1101;
+    max-height: 85dvh; overflow-y: auto;
+    background: var(--bg-surface); border-top: 1px solid var(--border-hover);
+    border-radius: 14px 14px 0 0; box-shadow: 0 -8px 32px rgba(0,0,0,0.25);
+    padding: 8px 12px calc(12px + env(safe-area-inset-bottom));
+    font-family: var(--font-mono), monospace;
+  }
+  .sheet.open { display: block; }
+  .sheet-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);
+    padding: 10px 4px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sheet-actions { display: flex; flex-direction: column; gap: 6px; }
+  .sheet-actions button {
+    min-height: 48px; width: 100%; text-align: left; padding: 0 14px;
+    background: var(--bg); border: 1px solid var(--border-hover); border-radius: 8px;
+    color: var(--text); font-family: inherit; font-size: 15px; cursor: pointer;
+  }
+  .sheet-actions button.on { color: var(--irc-warning); border-color: var(--irc-warning); }
+  .sheet-actions button.danger { color: var(--danger); }
+  .sheet-row { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 0 4px; }
+  .sheet-label { font-size: 14px; color: var(--text-mid); flex: 0 0 64px; }
+  .sheet-themes { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 4px 4px; }
+  .sheet-theme {
+    min-height: 44px; padding: 0 12px; border-radius: 8px; cursor: pointer;
+    background: var(--bg); border: 1px solid var(--border-hover); color: var(--text);
+    font-family: inherit; font-size: 13px; display: inline-flex; align-items: center; gap: 8px;
+  }
+  .sheet-theme.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .sheet-theme i { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgba(128,128,128,0.4); display: inline-block; }
 }
 
 /* A call not transcribed (skipped, failed): its reason, muted. A call waiting for its recording. */
@@ -1103,8 +1238,9 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
 
 <div class="titlebar">
   <button class="mobile-hamburger" id="mobile-hamburger" aria-label="Open channels">☰</button>
+  <span class="tb-dot connecting" id="tb-dot" aria-hidden="true"></span>
   <span class="server">trunk-pro</span>
-  <span>—</span>
+  <span class="tb-dash">—</span>
   <span id="titlebar-chan">*status</span>
   <button class="chan-edit-btn" id="titlebar-edit-btn" title="Edit channel name">&#9998;</button>
   <span class="topic" id="titlebar-topic">Connecting...</span>
@@ -1120,6 +1256,7 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
     </select>
     <input type="range" class="listen-vol" id="listen-vol" min="0" max="100" value="80" title="Live volume">
   </span>
+  <button class="mobile-hamburger mobile-menu-btn" id="mobile-menu-btn" aria-label="More">⋯</button>
 </div>
 
 <div class="main">
@@ -1202,6 +1339,21 @@ html.nerd .statusbar .nerd-btn { font-size: 9px; }
   <button class="nerd-btn" id="nerd-btn" title="Toggle hipster nerd cool mode">nerd</button>
 </div>
 <div class="nick-tooltip" id="nick-tooltip"></div>
+
+<!-- Phone only: bottom sheets. Their buttons press the desktop controls, so there is one code path. -->
+<div class="sheet-backdrop" id="sheet-backdrop"></div>
+<div class="sheet" id="chan-sheet" role="dialog" aria-label="Channel actions">
+  <div class="sheet-title" id="chan-sheet-title"></div>
+  <div class="sheet-actions" id="chan-sheet-actions"></div>
+</div>
+<div class="sheet" id="menu-sheet" role="dialog" aria-label="More">
+  <div class="sheet-title">Live listening</div>
+  <div class="sheet-row" id="sheet-listen-row"><span class="sheet-label">Hear</span></div>
+  <div class="sheet-row" id="sheet-vol-row"><span class="sheet-label">Volume</span></div>
+  <div class="sheet-actions" id="menu-sheet-actions"></div>
+  <div class="sheet-title">Theme</div>
+  <div class="sheet-themes" id="sheet-themes"></div>
+</div>
 
 <div id="unit-modal" class="unit-modal">
   <div class="unit-modal-box">
@@ -4266,6 +4418,9 @@ function setConnectionState(state) {
   if (window.ehSetNetworkStatus) window.ehSetNetworkStatus(state);
   const dot = treeStatus.querySelector('.dot');
 
+  const tbDot = document.getElementById('tb-dot');
+  if (tbDot) tbDot.className = 'tb-dot ' + state;
+
   if (state === 'connected') {
     treeStatus.innerHTML = '<span class="dot connected"></span>Connected';
     statusDot.className = 'status-ok';
@@ -5460,6 +5615,104 @@ function closeDrawers() {
 hamburgerBtn.addEventListener('click', () => openDrawer('channels'));
 usersBtn.addEventListener('click', () => openDrawer('users'));
 drawerBackdrop.addEventListener('click', closeDrawers);
+
+// ── Phone: bottom sheets ──
+// The channel sheet (tap the channel name) and the ⋯ sheet. Each button presses the desktop control
+// it stands for, so starring, ignoring and renaming have one implementation.
+const sheetBackdrop = document.getElementById('sheet-backdrop');
+const chanSheet = document.getElementById('chan-sheet');
+const menuSheet = document.getElementById('menu-sheet');
+
+function closeSheets() {
+  chanSheet.classList.remove('open');
+  menuSheet.classList.remove('open');
+  sheetBackdrop.classList.remove('visible');
+}
+function openSheet(sheet) {
+  closeDrawers();
+  closeSheets();
+  sheet.classList.add('open');
+  sheetBackdrop.classList.add('visible');
+}
+/** A sheet button standing for a desktop button: its label and lit state, and a press passed on. */
+function proxyButton(src, label) {
+  const b = document.createElement('button');
+  b.textContent = label || src.textContent.trim();
+  if (src.classList.contains('on') || src.classList.contains('active')) b.classList.add('on');
+  b.addEventListener('click', () => { closeSheets(); src.click(); });
+  return b;
+}
+function sheetButton(label, fn, on) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  if (on) b.classList.add('on');
+  b.addEventListener('click', () => { closeSheets(); fn(); });
+  return b;
+}
+const shownInline = (el) => el && el.style.display !== 'none';
+
+function openChanSheet() {
+  const ch = activeChannel, st = channels.get(ch);
+  if (!st) return;
+  updateIgnoreBar();
+  document.getElementById('chan-sheet-title').textContent = st.tgid ? `${ch} · TG ${st.tgid}` : ch;
+  const box = document.getElementById('chan-sheet-actions');
+  box.textContent = '';
+  if (st.tgid) box.append(sheetButton('✎ Rename', startChannelEdit));
+  const desc = document.getElementById('chan-desc-btn');
+  if (shownInline(desc)) box.append(sheetButton('✎ Edit description', startDescEdit));
+  if (channelKey(ch)) {
+    box.append(proxyButton(document.getElementById('chan-star')));
+    box.append(sheetButton(isScanned(ch) ? '📡 In the scanner (remove)' : '📡 Add to scanner', () => toggleScan(ch), isScanned(ch)));
+    box.append(proxyButton(document.getElementById('chan-ign-local')));
+    const recBtn = document.getElementById('chan-ign-rec');
+    if (shownInline(recBtn)) box.append(proxyButton(recBtn));
+  }
+  const em = document.getElementById('chan-em-clear');
+  if (shownInline(em)) box.append(proxyButton(em));
+  if (!box.children.length) return; // *status and the like: nothing to do
+  openSheet(chanSheet);
+}
+
+function openMenuSheet() {
+  const box = document.getElementById('menu-sheet-actions');
+  box.textContent = '';
+  box.append(proxyButton(document.getElementById('sync-btn')));
+  box.append(proxyButton(document.getElementById('scanner-btn'), scannerEnabled ? 'Scanner mode: on' : 'Scanner mode: off'));
+  const themes = document.getElementById('sheet-themes');
+  themes.textContent = '';
+  const eng = window.ThemeEngine;
+  if (eng) for (const key of eng.list()) {
+    const t = eng.config[key] || {};
+    const b = document.createElement('button');
+    b.className = 'sheet-theme' + (eng.current() === key ? ' active' : '');
+    const sw = document.createElement('i');
+    sw.style.background = (t.switcher && t.switcher.bg) || 'transparent';
+    b.append(sw, document.createTextNode(t.name || key));
+    b.addEventListener('click', () => { eng.apply(key); openMenuSheet(); });
+    themes.append(b);
+  }
+  openSheet(menuSheet);
+}
+
+/** Listen mode and volume: in the title bar on a desktop, in the ⋯ sheet on a phone. The same elements, moved. */
+function placeListenControls() {
+  const mode = document.getElementById('listen-mode'), vol = document.getElementById('listen-vol');
+  if (isMobileLayout()) {
+    document.getElementById('sheet-listen-row').append(mode);
+    document.getElementById('sheet-vol-row').append(vol);
+  } else {
+    document.getElementById('listen-ctl').append(mode, vol);
+    closeSheets();
+  }
+}
+window.matchMedia('(max-width: 768px)').addEventListener('change', placeListenControls);
+placeListenControls();
+
+titlebarChan.addEventListener('click', () => { if (isMobileLayout()) openChanSheet(); });
+document.getElementById('mobile-menu-btn').addEventListener('click', openMenuSheet);
+sheetBackdrop.addEventListener('click', closeSheets);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheets(); });
 
 // Swipe gestures for mobile drawers
 let touchStartX = 0;
